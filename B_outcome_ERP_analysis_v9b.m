@@ -1,0 +1,1018 @@
+% =============================================================================
+% OUTCOME ERP ANALYSIS v9b — FLAT-STRUCTURE COMBINED KH + RR EXTRACTION
+%
+% RESTRUCTURED vs v9 draft:
+%   - No local helper functions for the cohort-specific steps. Each
+%     cohort-dependent step is a top-level `if strcmp(cohort_name,'KH')`
+%     / `elseif strcmp(cohort_name,'RR')` block inside ONE shared
+%     participant loop that runs both cohorts back to back.
+%   - Channel labels, alignment mode, and feedback-column construction
+%     all branch this way instead of being hidden in a cfg struct +
+%     dispatch function.
+%
+% BUG FIXES vs v9 draft (see v9_bug_trace.txt for full detail):
+%   BUG 1/2 — FRN/RewP redefined per explicit spec (see below). The old
+%     "robust_negative_peak" with prominence thresholds is REMOVED.
+%     FRN_amp/RewP_amp no longer silently mean "mean amplitude" under
+%     a name that used to mean "peak amplitude" — column names now
+%     state exactly what they contain.
+%   BUG 3 — subject feature table is no longer truncated to
+%     min(height(stage_table), height(behav_table)). stage_table is
+%     authoritative; any optional behav_table columns are joined by
+%     trial_continuous index, not raw row truncation. Trials that
+%     exist in stage_table but not behav_table simply get NaN for the
+%     extra behav_table-only columns, instead of being silently dropped.
+%
+% =============================================================================
+% SINGLE-TRIAL FRN/REWP DEFINITION (per explicit spec)
+% -----------------------------------------------------------------------------
+% For each trial, in the FCz+Cz averaged waveform, within the window
+% FRN_win = [250 350] ms:
+%
+%   FRN_mean_amp   = mean(signal in window)            -- ALWAYS computed.
+%   FRN_peak_amp   = value at a genuine LOCAL MINIMUM strictly inside the
+%                    window (found via islocalmin on the windowed signal,
+%                    not simply the global min of the window — a window's
+%                    global min always exists even for a monotonic ramp,
+%                    which is not a real ERP peak).
+%   FRN_peak_lat   = latency of that local minimum.
+%
+%   If NO local minimum exists strictly inside the window (e.g. the
+%   signal is monotonic across the whole window, so the most negative
+%   point is just sitting at the window edge with no actual peak shape):
+%     FRN_peak_amp = NaN, FRN_peak_lat = NaN, FRN_excluded = true.
+%   Otherwise FRN_excluded = false, and FRN_peak_amp/lat are filled from
+%   the most prominent local minimum (most negative value among any
+%   local minima found).
+%
+%   FRN_mean_amp is NEVER excluded — it is reported regardless of
+%   whether a genuine peak was found, since a window mean always exists.
+%
+% RewP (reward positivity) is the mirror-image measure in the SAME
+% window [250 350] ms (matching the v9 draft's design choice that FRN
+% and RewP share a window, distinguished by outcome rather than by
+% separate windows): RewP_mean_amp = mean amplitude (always present),
+% RewP_peak_amp/lat = genuine LOCAL MAXIMUM in the window, with the
+% same exclusion logic (RewP_excluded flag) if no local maximum exists.
+% =============================================================================
+
+clear; close all;
+
+% -------------------------------------------------------------------------
+%% PATHS
+% -------------------------------------------------------------------------
+remote = 0;
+if remote == 1
+    base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch';
+else
+    base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
+end
+
+fieldtrip_path = 'C:\Users\khatinova\OneDrive - Nexus365\Pre_2026_Folders\Documents\MATLAB\fieldtrip-20240110';
+eeglab_path    = 'C:\Users\khatinova\OneDrive - Nexus365\Pre_2026_Folders\Documents\MATLAB\eeglab2025.1.0';
+
+addpath(fieldtrip_path); ft_defaults;
+addpath(eeglab_path);    eeglab nogui;
+
+KH_data_path = fullfile(base_path, 'Salient mod switch KH', 'Data');
+RR_data_path = fullfile(base_path, 'Salient mod switch RR', 'Data');
+addpath(genpath(KH_data_path));
+addpath(genpath(RR_data_path));
+
+load(fullfile(KH_data_path, 'all_trial_data.mat'));
+
+KH_behav_file = fullfile(KH_data_path, 'behav_table.mat');
+if exist(KH_behav_file, 'file')
+    S = load(KH_behav_file, 'group_T');
+    KH_behav_table = S.group_T;
+else
+    KH_behav_table = table();
+end
+
+KH_epoch_file_folder    = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Epoched_data');
+KH_figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Figures', 'outcome_v9b_KH');
+
+RR_epoch_file_folder    = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis', 'Epoched_data');
+RR_figure_output_folder = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis', 'Outcome_ERP_analysis_figures_v9b');
+
+if ~exist(KH_figure_output_folder, 'dir'), mkdir(KH_figure_output_folder); end
+if ~exist(RR_figure_output_folder, 'dir'), mkdir(RR_figure_output_folder); end
+if ~exist(KH_epoch_file_folder, 'dir'), error('KH epoch folder not found: %s', KH_epoch_file_folder); end
+if ~exist(RR_epoch_file_folder, 'dir'), error('RR epoch folder not found: %s', RR_epoch_file_folder); end
+
+% -------------------------------------------------------------------------
+%% GLOBAL PARAMETERS (shared across both cohorts)
+% -------------------------------------------------------------------------
+save_tables = true;
+ERP_plot_window = [-200 1000];
+rm_baseline     = [-200 0];
+
+N2_win    = [120 350];     % kept for backward-compatible diagnostic column
+FRN_win   = [250 350];
+RewP_win  = [250 350];
+P300_win  = [300 600];
+Theta_win = [200 500];
+PLV_win   = [200 400];
+PLV_baseline = [-200 0];
+
+MIN_TRIALS_PLV        = 5;
+PLV_WINDOW_HALF        = 7;
+MIN_TRIALS_PLV_WINDOW  = 5;
+
+stage_names  = {'LN','LE','RN','RE'};
+BTYPE_LABELS = {'D','P'};
+STAGE_COLORS = [0.12 0.62 0.47; 0.85 0.65 0.00; 0.80 0.27 0.13; 0.40 0.25 0.65];
+LINE_STYLES  = {'-','--'};
+
+% -------------------------------------------------------------------------
+%% COHORT LIST — flat, no struct dispatch. Loop runs each cohort name
+%% through the SAME code below, branching internally via cohort_name.
+% -------------------------------------------------------------------------
+cohort_names = {'KH', 'RR'};
+
+KH_valid_participants = [3:8, 10:12, 14:23, 27];
+RR_valid_participants = 1:15;
+
+all_handoff_tables = {};
+all_debug_rows     = {};
+
+% =========================================================================
+%% MAIN LOOP — one shared pipeline, cohort-specific steps as if-branches
+% =========================================================================
+for cohort_idx = 1:numel(cohort_names)
+
+    cohort_name = cohort_names{cohort_idx};
+    fprintf('\n\n############################################################\n');
+    fprintf('RUNNING COHORT: %s\n', cohort_name);
+    fprintf('############################################################\n');
+
+    % ---------------------------------------------------------------
+    % Cohort-specific settings (flat if-branches, not a config struct)
+    % ---------------------------------------------------------------
+    if strcmp(cohort_name, 'KH')
+        valid_participants = KH_valid_participants;
+        subj_prefix         = 'Ox';
+        epoch_file_folder    = KH_epoch_file_folder;
+        figure_output_folder = KH_figure_output_folder;
+        alignment_mode        = 'offset';
+        trimmed_preferred     = true;
+        mask = strcmp(KH_behav_table.researcher, 'KH');
+        behav_table_this = KH_behav_table(mask,:);
+        fcz_label = 'FCz'; cz_label = 'Cz';
+        par_channels = {'Pz','P1','P2'};
+        acc_channels = {'FCz','Fz','AFz','F1','F2'};
+        som_channels = {'C3','C4','CP3','CP1','C5','CP5'};
+        handoff_file = 'group_stage_table_features_KH_v9b.mat';
+        full_file    = 'group_table_all_trials_KH_v9b.mat';
+        grand_file   = 'grand_KH_v9b.mat';
+
+    elseif strcmp(cohort_name, 'RR')
+        valid_participants = RR_valid_participants;
+        subj_prefix          = 'Nc';
+        epoch_file_folder    = RR_epoch_file_folder;
+        figure_output_folder = RR_figure_output_folder;
+        alignment_mode        = 'direct';
+        trimmed_preferred     = false;
+        mask = strcmp(KH_behav_table.researcher, 'RR');
+        behav_table_this = KH_behav_table(mask,:);
+        fcz_label = 'E11'; cz_label = 'E7';
+        par_channels = {'E62','E67','E72'};
+        acc_channels = {'E11','E6','E16'};
+        som_channels = {'E36','E104','E41','E103'};
+        handoff_file = 'group_stage_table_features_RR_v9b.mat';
+        full_file    = 'group_table_all_trials_RR_v9b.mat';
+        grand_file   = 'grand_RR_v9b.mat';
+    end
+
+    % ---------------------------------------------------------------
+    % Grand-average containers for this cohort
+    % ---------------------------------------------------------------
+    empty_container = struct('data', [], 'subj', []);
+    grand = struct();
+    for s = 1:4
+        for bt = 1:2
+            bt_s = BTYPE_LABELS{bt};
+            grand.FCz.(stage_names{s}).(bt_s).correct    = empty_container;
+            grand.FCz.(stage_names{s}).(bt_s).incorrect  = empty_container;
+            grand.FCz.(stage_names{s}).(bt_s).false_cor  = empty_container;
+            grand.FCz.(stage_names{s}).(bt_s).false_inc  = empty_container;
+            grand.Par.(stage_names{s}).(bt_s).correct    = empty_container;
+            grand.Par.(stage_names{s}).(bt_s).incorrect  = empty_container;
+            grand.Theta.(stage_names{s}).(bt_s).correct  = empty_container;
+            grand.Theta.(stage_names{s}).(bt_s).incorrect= empty_container;
+            grand.PLV_fp.(stage_names{s}).(bt_s)         = empty_container;
+            grand.PLV_fs.(stage_names{s}).(bt_s)         = empty_container;
+        end
+    end
+
+    all_trials_table = table();
+    t_ax = [];
+
+    % ===================================================================
+    %% PARTICIPANT LOOP (shared structure, cohort branches inside)
+    % ===================================================================
+    for participant = valid_participants(3:end)
+
+        subj = sprintf('%s%02d', subj_prefix, participant);
+        fprintf('\n============ %s ============\n', subj);
+
+        if ~isfield(all_trial_data, subj)
+            warning('%s missing from all_trial_data. Skipping.', subj);
+            continue;
+        end
+
+        beh = all_trial_data.(subj).trial_data;
+        if strcmp(cohort_name, 'RR') && isfield(beh, 'structCode')
+            beh.block_structure = beh.structCode;
+        end
+
+        % -----------------------------------------------------------
+        % Flatten behavioural vectors — cohort-specific practice-block
+        % handling
+        % -----------------------------------------------------------
+        num_blocks  = height(beh.correct);
+        beh_correct = [];
+        beh_conf    = [];
+        beh_trueFB  = [];
+
+        if strcmp(cohort_name, 'KH') && num_blocks >= 6
+            beh.correct    = beh.correct(2:end,:);
+            beh.confidence = beh.confidence(2:end,:);
+            if isfield(beh,'trueFB'),   beh.trueFB   = beh.trueFB(2:end,:);   end
+            if isfield(beh,'revTrial'), beh.revTrial = beh.revTrial(2:end);   end
+        end
+        % (RR branch: no practice-block trimming needed)
+
+        num_blocks = height(beh.correct);
+        for b = 1:num_blocks
+            beh_correct = [beh_correct, beh.correct(b,:)]; %#ok<AGROW>
+            if isfield(beh,'confidence'), beh_conf   = [beh_conf,   beh.confidence(b,:)]; end %#ok<AGROW>
+            if isfield(beh,'trueFB'),     beh_trueFB = [beh_trueFB, beh.trueFB(b,:)];     end %#ok<AGROW>
+        end
+        if isempty(beh_trueFB), beh_trueFB = ones(size(beh_correct)); end
+        if isempty(beh_conf),   beh_conf   = nan(size(beh_correct));  end
+        total_trials = numel(beh_correct);
+
+        % -----------------------------------------------------------
+        % Load EEG files — cohort-specific filename preference order
+        % -----------------------------------------------------------
+        if strcmp(cohort_name, 'KH')
+            broadband_candidates = {sprintf('%s_outcome_trimmed.set', subj), sprintf('%s_outcome.set', subj)};
+            theta_candidates      = {sprintf('%s_outcome_theta_trimmed.set', subj), sprintf('%s_outcome_theta.set', subj)};
+            phase_candidates      = {sprintf('%s_outcome_phase_trimmed.set', subj), sprintf('%s_outcome_phase.set', subj)};
+        elseif strcmp(cohort_name, 'RR')
+            % RR: non-trimmed preferred — reverse the order
+            broadband_candidates = {sprintf('%s_outcome.set', subj), sprintf('%s_outcome_trimmed.set', subj)};
+            theta_candidates      = {sprintf('%s_outcome_theta.set', subj), sprintf('%s_outcome_theta_trimmed.set', subj)};
+            phase_candidates      = {sprintf('%s_outcome_phase.set', subj), sprintf('%s_outcome_phase_trimmed.set', subj)};
+        end
+
+        EEGp = [];
+        for ci2 = 1:numel(broadband_candidates)
+            f = fullfile(epoch_file_folder, broadband_candidates{ci2});
+            if exist(f, 'file')
+                EEGp = pop_loadset(broadband_candidates{ci2}, epoch_file_folder);
+                fprintf('  broadband: %s (%d epochs)\n', broadband_candidates{ci2}, EEGp.trials);
+                break;
+            end
+        end
+        if isempty(EEGp)
+            warning('broadband file missing for %s. Skipping participant.', subj);
+            continue;
+        end
+        if isempty(t_ax), t_ax = EEGp.times; end
+
+        EEGp_theta = [];
+        for ci2 = 1:numel(theta_candidates)
+            f = fullfile(epoch_file_folder, theta_candidates{ci2});
+            if exist(f, 'file')
+                EEGp_theta = pop_loadset(theta_candidates{ci2}, epoch_file_folder);
+                fprintf('  theta: %s (%d epochs)\n', theta_candidates{ci2}, EEGp_theta.trials);
+                break;
+            end
+        end
+        if isempty(EEGp_theta)
+            warning('theta file missing for %s; Theta_amp will be NaN.', subj);
+        end
+
+        EEGp_phase = [];
+        for ci2 = 1:numel(phase_candidates)
+            f = fullfile(epoch_file_folder, phase_candidates{ci2});
+            if exist(f, 'file')
+                EEGp_phase = pop_loadset(phase_candidates{ci2}, epoch_file_folder);
+                fprintf('  phase: %s (%d epochs)\n', phase_candidates{ci2}, EEGp_phase.trials);
+                break;
+            end
+        end
+        if isempty(EEGp_phase)
+            warning('phase file missing for %s; PLV columns will be NaN.', subj);
+        end
+
+        total_trials = min(total_trials, EEGp.trials);
+
+        % -----------------------------------------------------------
+        % Alignment — cohort-specific mode
+        % -----------------------------------------------------------
+        if strcmp(cohort_name, 'RR')
+            % Direct sequential alignment: epoch k = trial k
+            trial2epoch = (1:total_trials)';
+            fprintf('  Alignment: direct sequential (%d trials)\n', total_trials);
+
+        elseif strcmp(cohort_name, 'KH')
+            % Offset alignment via cached file or fresh computation
+            trial2epoch_file = fullfile(epoch_file_folder, sprintf('%s_trial2epoch.mat', subj));
+            if exist(trial2epoch_file, 'file')
+                S = load(trial2epoch_file);
+                if isfield(S, 'trial2epoch_out')
+                    trial2epoch = S.trial2epoch_out;
+                elseif isfield(S, 'trial2epoch')
+                    trial2epoch = S.trial2epoch;
+                else
+                    error('%s has unexpected field names.', trial2epoch_file);
+                end
+                fprintf('  trial2epoch: loaded from cache\n');
+            else
+                beh_cv = beh_correct(:);
+                beh_cv = beh_cv(~isnan(beh_cv));
+                [trial2epoch, diag] = KH_align_epochs_with_offset(EEGp, beh_cv);
+                fprintf('  trial2epoch: %d/%d matched (%.1f%%), offset=%d\n', ...
+                    diag.n_matched, diag.n_trials, diag.match_rate*100, diag.best_offset);
+                trial2epoch_out = trial2epoch;
+                save(trial2epoch_file, 'trial2epoch_out');
+            end
+            % trial2epoch = trial2epoch(:);
+            % if numel(trial2epoch) < total_trials
+            %     trial2epoch(end+1:total_trials) = NaN;
+            % elseif numel(trial2epoch) > total_trials
+            %     trial2epoch = trial2epoch(1:total_trials);
+            % end
+        end
+
+        % -----------------------------------------------------------
+        % Stage table (shared call, both cohorts)
+        % -----------------------------------------------------------
+        stage_table = define_trial_stages_v3(beh, trial2epoch, EEGp, participant, EEGp_theta, EEGp_phase);
+
+        % -----------------------------------------------------------
+        % Feedback-validity columns — cohort-specific construction
+        % -----------------------------------------------------------
+        if strcmp(cohort_name, 'RR')
+            fb_shown_correct_vec = false(total_trials, 1);
+            for k = 1:total_trials
+                ep_events = {EEGp.event([EEGp.event.epoch] == k).type};
+                if any(strcmp(ep_events, 'rewa'))
+                    fb_shown_correct_vec(k) = true;
+                end
+            end
+            false_fb_vec = ~logical(beh_trueFB(1:total_trials)');
+
+            stage_table.fb_shown_correct = false(height(stage_table), 1);
+            stage_table.false_fb         = false(height(stage_table), 1);
+            for r = 1:height(stage_table)
+                tc = stage_table.trial_continuous(r);
+                if tc >= 1 && tc <= total_trials
+                    stage_table.fb_shown_correct(r) = fb_shown_correct_vec(tc);
+                    stage_table.false_fb(r)         = false_fb_vec(tc);
+                end
+            end
+
+        elseif strcmp(cohort_name, 'KH')
+            if ~ismember('false_fb', stage_table.Properties.VariableNames)
+                stage_table.false_fb = false(height(stage_table), 1);
+            end
+            if ~ismember('fb_shown_correct', stage_table.Properties.VariableNames)
+                stage_table.fb_shown_correct = nan(height(stage_table), 1);
+            end
+        end
+
+        try
+            validate_stage_table(stage_table, EEGp, beh, participant);
+        catch ME
+            warning('%s validate_stage_table warning/failure: %s', subj, ME.message);
+        end
+
+        stage_table.confidence = nan(height(stage_table), 1);
+        conf_vec = beh_conf(:);
+        for r = 1:height(stage_table)
+            tc = stage_table.trial_continuous(r);
+            if tc >= 1 && tc <= numel(conf_vec)
+                stage_table.confidence(r) = conf_vec(tc);
+            end
+        end
+        stage_table.subj       = repmat(participant, height(stage_table), 1);
+        stage_table.subj_id    = repmat(string(subj), height(stage_table), 1);
+        stage_table.cohort     = repmat(string(cohort_name), height(stage_table), 1);
+        stage_table.is_cohort1 = repmat(strcmp(cohort_name,'KH') && participant <= 8, height(stage_table), 1);
+
+        % -----------------------------------------------------------
+        % Channel indices and time masks (shared code, cohort-specific
+        % channel labels already selected above)
+        % -----------------------------------------------------------
+        fcz_idx = find(ismember(lower({EEGp.chanlocs.labels}), lower({fcz_label})));
+        cz_idx  = find(ismember(lower({EEGp.chanlocs.labels}), lower({cz_label})));
+        par_idx = find(ismember(lower({EEGp.chanlocs.labels}), lower(par_channels)));
+        acc_idx = find(ismember(lower({EEGp.chanlocs.labels}), lower(acc_channels)));
+        som_idx = find(ismember(lower({EEGp.chanlocs.labels}), lower(som_channels)));
+
+        bl_mask   = EEGp.times >= rm_baseline(1) & EEGp.times <= rm_baseline(2);
+        n2_mask   = EEGp.times >= N2_win(1)      & EEGp.times <= N2_win(2);
+        frn_mask  = EEGp.times >= FRN_win(1)     & EEGp.times <= FRN_win(2);
+        rewp_mask = EEGp.times >= RewP_win(1)    & EEGp.times <= RewP_win(2);
+        p300_mask = EEGp.times >= P300_win(1)    & EEGp.times <= P300_win(2);
+        th_mask   = EEGp.times >= Theta_win(1)   & EEGp.times <= Theta_win(2);
+        plv_mask  = EEGp.times >= PLV_win(1)     & EEGp.times <= PLV_win(2);
+        plv_bl    = EEGp.times >= PLV_baseline(1) & EEGp.times <= PLV_baseline(2);
+
+        if ~isempty(fcz_idx)
+            bl_data   = squeeze(double(EEGp.data(fcz_idx, bl_mask, :)));
+            bline_rms = rms(bl_data(:), 'omitnan');
+        else
+            bline_rms = NaN;
+        end
+
+       % -----------------------------------------------------------
+        % Build feature table spine from the joint behavioural table.
+        % Behaviour is authoritative: keep ALL behavioural rows.
+        % EEG/stage variables are joined onto this table.
+        % -----------------------------------------------------------
+        
+        if isempty(behav_table_this) || ~ismember('subjID', behav_table_this.Properties.VariableNames)
+            error('behav_table_this is empty or lacks subjID. Cannot build behavioural spine for %s.', subj);
+        end
+        
+        rows = string(behav_table_this.subjID) == string(subj);
+        
+        if ~any(rows)
+            warning('%s has no rows in joint behavioural table. Falling back to stage_table spine.', subj);
+            subj_features = stage_table;
+        else
+            subj_features = behav_table_this(rows, :);
+        end
+        
+        n_rows = height(subj_features);
+        
+        % Ensure core subject/cohort IDs
+        subj_features.subj_id = repmat(string(subj), n_rows, 1);
+        subj_features.cohort  = repmat(string(cohort_name), n_rows, 1);
+        subj_features.subj    = repmat(participant, n_rows, 1);
+        
+        % Trial index used for joining. Prefer existing trial_continuous.
+        if ~ismember('trial_continuous', subj_features.Properties.VariableNames)
+            subj_features.trial_continuous = (1:n_rows)';
+        end
+        
+        % Initialise EEG/stage columns for ALL behavioural rows
+        subj_features.epoch         = nan(n_rows, 1);
+        subj_features.has_eeg_epoch = false(n_rows, 1);
+        
+        subj_features.stage      = categorical(repmat(missing, n_rows, 1), {'LN','LE','RN','RE'});
+        subj_features.block_type = categorical(repmat(missing, n_rows, 1), {'D','P'});
+        
+        subj_features.false_fb         = false(n_rows, 1);
+        subj_features.fb_shown_correct = nan(n_rows, 1);
+        subj_features.confidence       = nan(n_rows, 1);
+        
+        if ~ismember('block_number', subj_features.Properties.VariableNames)
+            subj_features.block_number = nan(n_rows, 1);
+        end
+        
+        if ~ismember('trial_in_block', subj_features.Properties.VariableNames)
+            subj_features.trial_in_block = nan(n_rows, 1);
+        end
+        
+        % Join stage_table values by trial_continuous
+        for r = 1:height(stage_table)
+        
+            tc = stage_table.trial_continuous(r);
+        
+            if isnan(tc) || tc < 1 || tc > n_rows
+                continue
+            end
+        
+            % epoch
+            if ismember('epoch', stage_table.Properties.VariableNames)
+                subj_features.epoch(tc) = stage_table.epoch(r);
+            elseif tc <= numel(trial2epoch)
+                subj_features.epoch(tc) = trial2epoch(tc);
+            end
+        
+            % stage
+            if ismember('stage', stage_table.Properties.VariableNames)
+                subj_features.stage(tc) = categorical(string(stage_table.stage(r)), {'LN','LE','RN','RE'});
+            end
+        
+            % block_type
+            if ismember('block_type', stage_table.Properties.VariableNames)
+                subj_features.block_type(tc) = categorical(string(stage_table.block_type(r)), {'D','P'});
+            end
+        
+            % correct: use stage_table only if behavioural table lacks it
+            if ismember('correct', stage_table.Properties.VariableNames) && ...
+               ~ismember('correct', behav_table_this.Properties.VariableNames)
+                subj_features.correct(tc) = stage_table.correct(r);
+            end
+        
+            if ismember('false_fb', stage_table.Properties.VariableNames)
+                subj_features.false_fb(tc) = logical(stage_table.false_fb(r));
+            end
+        
+            if ismember('fb_shown_correct', stage_table.Properties.VariableNames)
+                subj_features.fb_shown_correct(tc) = stage_table.fb_shown_correct(r);
+            end
+        
+            if ismember('confidence', stage_table.Properties.VariableNames)
+                subj_features.confidence(tc) = stage_table.confidence(r);
+            end
+        
+            if ismember('block_number', stage_table.Properties.VariableNames)
+                subj_features.block_number(tc) = stage_table.block_number(r);
+            end
+        
+            if ismember('trial_in_block', stage_table.Properties.VariableNames)
+                subj_features.trial_in_block(tc) = stage_table.trial_in_block(r);
+            end
+        end
+        
+        % Fill epoch from trial2epoch where still missing
+        n_ep = min(numel(trial2epoch), n_rows);
+        missing_epoch = isnan(subj_features.epoch(1:n_ep));
+        tmp_epoch = subj_features.epoch(1:n_ep);
+        tmp_epoch(missing_epoch) = trial2epoch(missing_epoch);
+        subj_features.epoch(1:n_ep) = tmp_epoch;
+        
+        subj_features.has_eeg_epoch = ~isnan(subj_features.epoch);
+
+        % -----------------------------------------------------------
+        % Initialise feature columns
+        % -----------------------------------------------------------
+        subj_features.epoch         = trial2epoch(1:n_rows);
+        subj_features.has_eeg_epoch = ~isnan(subj_features.epoch);
+
+        subj_features.baseline_rms = repmat(bline_rms, n_rows, 1);
+
+        subj_features.N2_amp  = nan(n_rows,1);
+        subj_features.N2_lat  = nan(n_rows,1);
+        subj_features.N2_norm = nan(n_rows,1);
+
+        % [REDEFINED FRN — see header spec]
+        subj_features.FRN_mean_amp = nan(n_rows,1);
+        subj_features.FRN_mean_norm = nan(n_rows,1);
+        subj_features.FRN_peak_amp = nan(n_rows,1);
+        subj_features.FRN_peak_lat = nan(n_rows,1);
+        subj_features.FRN_peak_norm = nan(n_rows,1);
+        subj_features.FRN_excluded = false(n_rows,1);
+
+        % [REDEFINED RewP — mirror of FRN, same window per v9 design]
+        subj_features.RewP_mean_amp = nan(n_rows,1);
+        subj_features.RewP_mean_norm = nan(n_rows,1);
+        subj_features.RewP_peak_amp = nan(n_rows,1);
+        subj_features.RewP_peak_lat = nan(n_rows,1);
+        subj_features.RewP_peak_norm = nan(n_rows,1);
+        subj_features.RewP_excluded = false(n_rows,1);
+
+        subj_features.P300_amp      = nan(n_rows,1);
+        subj_features.P300_peak_lat = nan(n_rows,1);
+        subj_features.P300_norm     = nan(n_rows,1);
+        subj_features.Theta_amp     = nan(n_rows,1);
+
+        subj_features.PLV_fp          = nan(n_rows,1);
+        subj_features.PLV_fs          = nan(n_rows,1);
+        subj_features.PLV_fp_pairwise = nan(n_rows,1);
+        subj_features.PLV_fs_pairwise = nan(n_rows,1);
+
+        subj_features.FCzCz_waveform = repmat({[]}, n_rows, 1);
+        subj_features.P300_waveform  = repmat({[]}, n_rows, 1);
+        subj_features.Theta_waveform = repmat({[]}, n_rows, 1);
+
+        % -----------------------------------------------------------
+        % Per-trial EEG feature extraction (shared code — channel
+        % indices already differ by cohort via fcz_idx/par_idx/etc,
+        % computed above with cohort-specific labels)
+        % -----------------------------------------------------------
+        for ti = 1:n_rows
+            ep = subj_features.epoch(ti);
+            if isnan(ep) || ep < 1 || ep > EEGp.trials, continue; end
+            ep = round(ep);
+
+            % ---- FCz+Cz waveform: N2, FRN, RewP ----
+            if ~isempty(fcz_idx) && ~isempty(cz_idx) && ~isnan(bline_rms)
+                sig = mean(double(EEGp.data([fcz_idx cz_idx], :, ep)), 1, 'omitnan');
+                sig = sig - mean(sig(bl_mask), 'omitnan');
+                subj_features.FCzCz_waveform{ti} = sig;
+
+                % Diagnostic N2 (global min in N2_win — kept as-is,
+                % this is NOT the FRN measure, just a legacy diagnostic)
+                win_vals = sig(n2_mask); win_t = EEGp.times(n2_mask);
+                if any(~isnan(win_vals))
+                    [pk, ix] = min(win_vals, [], 'omitnan');
+                    subj_features.N2_amp(ti) = pk;
+                    subj_features.N2_lat(ti) = win_t(ix);
+                    if bline_rms > 0, subj_features.N2_norm(ti) = pk / bline_rms; end
+                end
+
+                % ---- FRN: mean (always) + genuine local-minimum peak ----
+                frn_vals = sig(frn_mask);
+                frn_t    = EEGp.times(frn_mask);
+                if any(~isnan(frn_vals))
+                    subj_features.FRN_mean_amp(ti) = mean(frn_vals, 'omitnan');
+                    if bline_rms > 0
+                        subj_features.FRN_mean_norm(ti) = subj_features.FRN_mean_amp(ti) / bline_rms;
+                    end
+
+                    % Genuine local minimum strictly inside the window.
+                    % islocalmin flags points lower than BOTH neighbors;
+                    % the first/last sample of the window can never be
+                    % flagged this way since they lack a neighbor on one
+                    % side, so edge-only "minima" are automatically
+                    % excluded without a separate edge-margin parameter.
+                    is_min = islocalmin(frn_vals);
+                    if any(is_min)
+                        cand_vals = frn_vals(is_min);
+                        cand_t    = frn_t(is_min);
+                        [pk_amp, ix] = min(cand_vals);  % most negative local min
+                        subj_features.FRN_peak_amp(ti) = pk_amp;
+                        subj_features.FRN_peak_lat(ti) = cand_t(ix);
+                        if bline_rms > 0
+                            subj_features.FRN_peak_norm(ti) = pk_amp / bline_rms;
+                        end
+                        subj_features.FRN_excluded(ti) = false;
+                    else
+                        % No genuine negative peak in window — exclude+flag
+                        subj_features.FRN_peak_amp(ti) = NaN;
+                        subj_features.FRN_peak_lat(ti) = NaN;
+                        subj_features.FRN_peak_norm(ti) = NaN;
+                        subj_features.FRN_excluded(ti) = true;
+                    end
+                else
+                    subj_features.FRN_excluded(ti) = true;  % no valid samples at all
+                end
+
+                % ---- RewP: mean (always) + genuine local-maximum peak ----
+                rewp_vals = sig(rewp_mask);
+                rewp_t    = EEGp.times(rewp_mask);
+                if any(~isnan(rewp_vals))
+                    subj_features.RewP_mean_amp(ti) = mean(rewp_vals, 'omitnan');
+                    if bline_rms > 0
+                        subj_features.RewP_mean_norm(ti) = subj_features.RewP_mean_amp(ti) / bline_rms;
+                    end
+
+                    is_max = islocalmax(rewp_vals);
+                    if any(is_max)
+                        cand_vals = rewp_vals(is_max);
+                        cand_t    = rewp_t(is_max);
+                        [pk_amp, ix] = max(cand_vals);  % most positive local max
+                        subj_features.RewP_peak_amp(ti) = pk_amp;
+                        subj_features.RewP_peak_lat(ti) = cand_t(ix);
+                        if bline_rms > 0
+                            subj_features.RewP_peak_norm(ti) = pk_amp / bline_rms;
+                        end
+                        subj_features.RewP_excluded(ti) = false;
+                    else
+                        subj_features.RewP_peak_amp(ti) = NaN;
+                        subj_features.RewP_peak_lat(ti) = NaN;
+                        subj_features.RewP_peak_norm(ti) = NaN;
+                        subj_features.RewP_excluded(ti) = true;
+                    end
+                else
+                    subj_features.RewP_excluded(ti) = true;
+                end
+            end
+
+            % ---- P300 ----
+            if ~isempty(par_idx) && ~isnan(bline_rms)
+                sig_p = mean(double(EEGp.data(par_idx, :, ep)), 1, 'omitnan');
+                sig_p = sig_p - mean(sig_p(bl_mask), 'omitnan');
+                subj_features.P300_waveform{ti} = sig_p;
+                win_vals = sig_p(p300_mask); win_t = EEGp.times(p300_mask);
+                if any(~isnan(win_vals))
+                    [pk, ix] = max(win_vals, [], 'omitnan');
+                    subj_features.P300_amp(ti) = pk;
+                    subj_features.P300_peak_lat(ti) = win_t(ix);
+                    if bline_rms > 0, subj_features.P300_norm(ti) = pk / bline_rms; end
+                end
+            end
+
+            % ---- Theta ----
+            if ~isempty(EEGp_theta) && ~isempty(acc_idx) && ep <= EEGp_theta.trials
+                sig_th = mean(double(EEGp_theta.data(acc_idx, :, ep)), 1, 'omitnan');
+                env = abs(hilbert(sig_th));
+                env = env - mean(env(bl_mask), 'omitnan');
+                subj_features.Theta_amp(ti) = mean(env(th_mask), 'omitnan');
+                subj_features.Theta_waveform{ti} = env;
+            end
+        end
+
+        % -----------------------------------------------------------
+        % Sliding-window single-trial PLV (shared code, both cohorts)
+        % -----------------------------------------------------------
+        if ~isempty(acc_idx) && ~isempty(EEGp_phase) && EEGp_phase.trials > 0
+            row_idx  = (1:n_rows)';
+            valid_ep = ~isnan(subj_features.epoch) & subj_features.epoch >= 1 & ...
+                       subj_features.epoch <= EEGp_phase.trials;
+
+            unique_buckets = unique([string(subj_features.stage(valid_ep)), ...
+                                      string(subj_features.block_type(valid_ep)), ...
+                                      string(subj_features.correct(valid_ep))], 'rows');
+
+            for ub = 1:size(unique_buckets,1)
+                bucket_mask = valid_ep & ...
+                    string(subj_features.stage)==unique_buckets(ub,1) & ...
+                    string(subj_features.block_type)==unique_buckets(ub,2) & ...
+                    string(subj_features.correct)==unique_buckets(ub,3);
+
+                bucket_rows = row_idx(bucket_mask);
+                if numel(bucket_rows) < MIN_TRIALS_PLV_WINDOW, continue; end
+
+                [~, ord] = sort(subj_features.trial_continuous(bucket_rows));
+                bucket_rows = bucket_rows(ord);
+
+                n_bucket = numel(bucket_rows);
+                for bi = 1:n_bucket
+                    win_lo = max(1, bi - PLV_WINDOW_HALF);
+                    win_hi = min(n_bucket, bi + PLV_WINDOW_HALF);
+                    window_rows = bucket_rows(win_lo:win_hi);
+                    if numel(window_rows) < MIN_TRIALS_PLV_WINDOW, continue; end
+
+                    eps_window = subj_features.epoch(window_rows);
+                    eps_window = eps_window(~isnan(eps_window) & eps_window>=1 & eps_window<=EEGp_phase.trials);
+                    eps_window = round(eps_window);
+                    if numel(eps_window) < MIN_TRIALS_PLV_WINDOW, continue; end
+
+                    center_row = bucket_rows(bi);
+
+                    if ~isempty(par_idx)
+                        phi_ref = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(acc_idx,:,eps_window))),1,'omitnan')))';
+                        phi_tgt = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(par_idx,:,eps_window))),1,'omitnan')))';
+                        if isvector(phi_ref) && numel(eps_window)==1, phi_ref = phi_ref(:)'; end
+                        if isvector(phi_tgt) && numel(eps_window)==1, phi_tgt = phi_tgt(:)'; end
+                        plv_ts = abs(mean(exp(1i*(phi_ref-phi_tgt)),1,'omitnan'));
+                        plv_ts = plv_ts - mean(plv_ts(plv_bl), 'omitnan');
+                        plv_scalar = mean(plv_ts(plv_mask), 'omitnan');
+                        subj_features.PLV_fp(center_row) = plv_scalar;
+                        subj_features.PLV_fp_pairwise(center_row) = plv_scalar;
+                    end
+                    if ~isempty(som_idx)
+                        phi_ref = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(acc_idx,:,eps_window))),1,'omitnan')))';
+                        phi_tgt = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(som_idx,:,eps_window))),1,'omitnan')))';
+                        if isvector(phi_ref) && numel(eps_window)==1, phi_ref = phi_ref(:)'; end
+                        if isvector(phi_tgt) && numel(eps_window)==1, phi_tgt = phi_tgt(:)'; end
+                        plv_ts = abs(mean(exp(1i*(phi_ref-phi_tgt)),1,'omitnan'));
+                        plv_ts = plv_ts - mean(plv_ts(plv_bl), 'omitnan');
+                        plv_scalar = mean(plv_ts(plv_mask), 'omitnan');
+                        subj_features.PLV_fs(center_row) = plv_scalar;
+                        subj_features.PLV_fs_pairwise(center_row) = plv_scalar;
+                    end
+                end
+            end
+        end
+
+        all_trials_table = [all_trials_table; subj_features]; %#ok<AGROW>
+
+        % -----------------------------------------------------------
+        % Grand average accumulation (shared code, both cohorts)
+        % -----------------------------------------------------------
+        has_P = any(stage_table.block_type == 'P');
+        for s_i = 1:4
+            for bt_i = 1:2
+                bt = BTYPE_LABELS{bt_i};
+                if strcmp(bt,'P') && ~has_P, continue; end
+                base_mask = stage_table.block_type==bt & stage_table.stage==stage_names{s_i};
+
+                cond_specs = { ...
+                    'correct',   base_mask & stage_table.correct==1 & ~stage_table.false_fb, fcz_idx, 'FCz'; ...
+                    'incorrect', base_mask & stage_table.correct==0 & ~stage_table.false_fb, fcz_idx, 'FCz'; ...
+                    'correct',   base_mask & stage_table.correct==1 & ~stage_table.false_fb, par_idx, 'Par'; ...
+                    'incorrect', base_mask & stage_table.correct==0 & ~stage_table.false_fb, par_idx, 'Par'; ...
+                };
+                for cci = 1:size(cond_specs,1)
+                    cname  = cond_specs{cci,1};
+                    cmask  = cond_specs{cci,2};
+                    ch_idx = cond_specs{cci,3};
+                    gfield = cond_specs{cci,4};
+                    if isempty(ch_idx), continue; end
+                    eps_c = stage_table.epoch(cmask);
+                    eps_c = eps_c(~isnan(eps_c) & eps_c>=1 & eps_c<=EEGp.trials);
+                    eps_c = round(eps_c);
+                    if isempty(eps_c), continue; end
+                    if isscalar(ch_idx)
+                        raw = squeeze(double(EEGp.data(ch_idx,:,eps_c)))';
+                    else
+                        raw = squeeze(mean(double(EEGp.data(ch_idx,:,eps_c)),1,'omitnan'))';
+                    end
+                    if isvector(raw) && numel(eps_c)==1, raw = raw(:)'; end
+                    dat = raw - mean(raw(:,bl_mask),2,'omitnan');
+                    grand.(gfield).(stage_names{s_i}).(bt).(cname).data(end+1,:) = mean(dat,1,'omitnan');
+                    grand.(gfield).(stage_names{s_i}).(bt).(cname).subj(end+1,1) = participant;
+                end
+
+                if strcmp(bt,'P') && ~isempty(fcz_idx)
+                    ff_specs = {'false_cor', base_mask & stage_table.false_fb & stage_table.fb_shown_correct==1;
+                                'false_inc', base_mask & stage_table.false_fb & stage_table.fb_shown_correct==0};
+                    for fi = 1:2
+                        eps_f = stage_table.epoch(ff_specs{fi,2});
+                        eps_f = eps_f(~isnan(eps_f) & eps_f>=1 & eps_f<=EEGp.trials);
+                        eps_f = round(eps_f);
+                        if isempty(eps_f), continue; end
+                        raw = squeeze(double(EEGp.data(fcz_idx,:,eps_f)))';
+                        if isvector(raw) && numel(eps_f)==1, raw = raw(:)'; end
+                        dat = raw - mean(raw(:,bl_mask),2,'omitnan');
+                        grand.FCz.(stage_names{s_i}).(bt).(ff_specs{fi,1}).data(end+1,:) = mean(dat,1,'omitnan');
+                        grand.FCz.(stage_names{s_i}).(bt).(ff_specs{fi,1}).subj(end+1,1) = participant;
+                    end
+                end
+
+                if ~isempty(EEGp_theta) && ~isempty(acc_idx)
+                    for oc = {'correct','incorrect'}
+                        oc_val = strcmp(oc{1}, 'correct');
+                        eps_th = stage_table.epoch(base_mask & stage_table.correct==oc_val & ~stage_table.false_fb);
+                        eps_th = eps_th(~isnan(eps_th) & eps_th>=1 & eps_th<=EEGp_theta.trials);
+                        eps_th = round(eps_th);
+                        if isempty(eps_th), continue; end
+                        raw = squeeze(mean(double(EEGp_theta.data(acc_idx,:,eps_th)),1,'omitnan'))';
+                        if isvector(raw) && numel(eps_th)==1, raw = raw(:)'; end
+                        th_mat = nan(size(raw));
+                        for kk = 1:size(raw,1)
+                            env = abs(hilbert(double(raw(kk,:))));
+                            th_mat(kk,:) = env - mean(env(bl_mask), 'omitnan');
+                        end
+                        grand.Theta.(stage_names{s_i}).(bt).(oc{1}).data(end+1,:) = mean(th_mat,1,'omitnan');
+                        grand.Theta.(stage_names{s_i}).(bt).(oc{1}).subj(end+1,1) = participant;
+                    end
+                end
+
+                if ~isempty(EEGp_phase) && ~isempty(acc_idx)
+                    eps_plv = stage_table.epoch(base_mask & ~stage_table.false_fb);
+                    eps_plv = eps_plv(~isnan(eps_plv) & eps_plv>=1 & eps_plv<=EEGp_phase.trials);
+                    eps_plv = round(eps_plv);
+                    if numel(eps_plv) >= MIN_TRIALS_PLV
+                        if ~isempty(par_idx)
+                            phi_ref = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(acc_idx,:,eps_plv))),1,'omitnan')))';
+                            phi_tgt = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(par_idx,:,eps_plv))),1,'omitnan')))';
+                            plv_ts = abs(mean(exp(1i*(phi_ref-phi_tgt)),1,'omitnan'));
+                            plv_ts = plv_ts - mean(plv_ts(plv_bl), 'omitnan');
+                            grand.PLV_fp.(stage_names{s_i}).(bt).data(end+1,:) = plv_ts;
+                            grand.PLV_fp.(stage_names{s_i}).(bt).subj(end+1,1) = participant;
+                        end
+                        if ~isempty(som_idx)
+                            phi_ref = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(acc_idx,:,eps_plv))),1,'omitnan')))';
+                            phi_tgt = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(som_idx,:,eps_plv))),1,'omitnan')))';
+                            plv_ts = abs(mean(exp(1i*(phi_ref-phi_tgt)),1,'omitnan'));
+                            plv_ts = plv_ts - mean(plv_ts(plv_bl), 'omitnan');
+                            grand.PLV_fs.(stage_names{s_i}).(bt).data(end+1,:) = plv_ts;
+                            grand.PLV_fs.(stage_names{s_i}).(bt).subj(end+1,1) = participant;
+                        end
+                    end
+                end
+            end
+        end
+
+        % -----------------------------------------------------------
+        % Per-subject ERP figure (shared code)
+        % -----------------------------------------------------------
+        fig = figure('Position',[50 50 1400 560],'Visible','off');
+        sgtitle(sprintf('%s — FCz ERP by stage', subj), 'Interpreter','none');
+        for s_i = 1:4
+            for oc_i = 1:2
+                oc = {'correct','incorrect'};
+                ax = subplot(2,4,(oc_i-1)*4+s_i); hold(ax,'on');
+                title(ax, sprintf('%s | %s', stage_names{s_i}, oc{oc_i}));
+                xline(ax,0,'k:','HandleVisibility','off'); yline(ax,0,'k:','HandleVisibility','off');
+                for bt_i = 1:2
+                    bt = BTYPE_LABELS{bt_i};
+                    if strcmp(bt,'P') && ~has_P, continue; end
+                    oc_val = strcmp(oc{oc_i}, 'correct');
+                    m = stage_table.block_type==bt & stage_table.stage==stage_names{s_i} & ...
+                        stage_table.correct==oc_val & ~stage_table.false_fb;
+                    eps_plot = stage_table.epoch(m);
+                    eps_plot = eps_plot(~isnan(eps_plot) & eps_plot>=1 & eps_plot<=EEGp.trials);
+                    eps_plot = round(eps_plot);
+                    if isempty(eps_plot) || isempty(fcz_idx), continue; end
+                    raw = squeeze(double(EEGp.data(fcz_idx,:,eps_plot)))';
+                    if isvector(raw) && numel(eps_plot)==1, raw = raw(:)'; end
+                    dat = raw - mean(raw(:,bl_mask),2,'omitnan');
+                    in_win = EEGp.times >= ERP_plot_window(1) & EEGp.times <= ERP_plot_window(2);
+                    mn = mean(dat(:,in_win),1,'omitnan');
+                    se = std(dat(:,in_win),0,1,'omitnan') ./ sqrt(size(dat,1));
+                    tt = EEGp.times(in_win);
+                    fill(ax,[tt fliplr(tt)],[mn+se fliplr(mn-se)],STAGE_COLORS(s_i,:), ...
+                        'FaceAlpha',0.12,'EdgeColor','none','HandleVisibility','off');
+                    plot(ax,tt,mn,'Color',STAGE_COLORS(s_i,:),'LineWidth',1.5,'LineStyle',LINE_STYLES{bt_i}, ...
+                        'DisplayName',sprintf('%s-%s (n=%d)',oc{oc_i},bt,size(dat,1)));
+                end
+                set(ax,'YDir','reverse'); xlabel(ax,'Time (ms)'); ylabel(ax,'\muV');
+                xlim(ax,ERP_plot_window); legend(ax,'Box','off','FontSize',7);
+            end
+        end
+        saveas(fig, fullfile(figure_output_folder, sprintf('%s_FCz_stage_v9b.pdf', subj)));
+        close(fig);
+
+        % -----------------------------------------------------------
+        % Debug row for this subject
+        % -----------------------------------------------------------
+        all_debug_rows(end+1,:) = {string(cohort_name), string(subj), participant, n_rows, ...
+            sum(subj_features.has_eeg_epoch), sum(~cellfun(@isempty, subj_features.FCzCz_waveform)), ...
+            sum(~isnan(subj_features.FRN_mean_amp)), sum(~subj_features.FRN_excluded), ...
+            mean(~subj_features.FRN_excluded, 'omitnan'), bline_rms}; %#ok<AGROW>
+
+        clear EEGp EEGp_theta EEGp_phase
+    end % participant loop
+
+    % -------------------------------------------------------------------
+    %% Finalise this cohort's table: types + z-scoring
+    % -------------------------------------------------------------------
+    group_table = all_trials_table;
+    group_table.subj_id = categorical(string(group_table.subj_id));
+    group_table.cohort  = categorical(string(group_table.cohort));
+    if ismember('stage', group_table.Properties.VariableNames)
+        group_table.stage = categorical(string(group_table.stage), {'LN','LE','RN','RE'}, 'Ordinal', false);
+    end
+    if ismember('block_type', group_table.Properties.VariableNames)
+        group_table.block_type = categorical(string(group_table.block_type), {'D','P'});
+    end
+
+    % z-score per subject — note FRN/RewP columns renamed to mean_amp/peak_amp
+    features_to_zscore = {'N2_amp','FRN_mean_amp','FRN_peak_amp','RewP_mean_amp','RewP_peak_amp', ...
+        'P300_amp','Theta_amp','PLV_fp','PLV_fs','PLV_fp_pairwise','PLV_fs_pairwise'};
+    for f = 1:numel(features_to_zscore)
+        fn = features_to_zscore{f};
+        if ~ismember(fn, group_table.Properties.VariableNames), continue; end
+        fn_z = [fn '_z'];
+        group_table.(fn_z) = nan(height(group_table),1);
+        subjs = categories(group_table.subj_id);
+        for si = 1:numel(subjs)
+            mask = group_table.subj_id == subjs{si};
+            vals = group_table.(fn)(mask);
+            mn = mean(vals, 'omitnan');
+            sd = std(vals, 'omitnan');
+            if sd > 0
+                group_table.(fn_z)(mask) = (vals - mn) ./ sd;
+            end
+        end
+    end
+
+    if save_tables
+        waveform_vars = {'FCzCz_waveform','P300_waveform','Theta_waveform'};
+        handoff_vars  = setdiff(group_table.Properties.VariableNames, waveform_vars);
+        group_table_save = group_table(:, handoff_vars); %#ok<NASGU>
+        save(fullfile(epoch_file_folder, handoff_file), 'group_table_save');
+
+        save(fullfile(epoch_file_folder, full_file), 'all_trials_table', 't_ax');
+        save(fullfile(epoch_file_folder, grand_file), 'grand', 't_ax');
+        fprintf('Saved %s, %s, %s\n', handoff_file, full_file, grand_file);
+    end
+
+    all_handoff_tables{end+1} = group_table; %#ok<AGROW>
+
+    fprintf('\nCohort %s complete: %d trials, %d subjects\n', ...
+        cohort_name, height(group_table), numel(unique(group_table.subj_id)));
+
+end % cohort loop
+
+% =========================================================================
+%% COMBINE KH + RR HANDOFF TABLES (union of columns, missing -> NaN)
+% =========================================================================
+fprintf('\nCombining KH + RR handoff tables...\n');
+
+waveform_vars = {'FCzCz_waveform','P300_waveform','Theta_waveform'};
+
+all_vars = {};
+for i = 1:numel(all_handoff_tables)
+    these_vars = setdiff(all_handoff_tables{i}.Properties.VariableNames, waveform_vars);
+    all_vars = union(all_vars, these_vars, 'stable');
+end
+
+tables_for_combine = cell(numel(all_handoff_tables),1);
+for i = 1:numel(all_handoff_tables)
+    T = all_handoff_tables{i}(:, setdiff(all_handoff_tables{i}.Properties.VariableNames, waveform_vars));
+    missing_cols = setdiff(all_vars, T.Properties.VariableNames, 'stable');
+    for m = 1:numel(missing_cols)
+        T.(missing_cols{m}) = nan(height(T),1);
+    end
+    tables_for_combine{i} = T(:, all_vars);
+end
+
+group_table_combined = vertcat(tables_for_combine{:});
+group_table_combined.subj_id = categorical(string(group_table_combined.subj_id));
+
+combined_out_folder = KH_epoch_file_folder;
+save(fullfile(combined_out_folder, 'group_feature_table_combined_v9b.mat'), 'group_table_combined');
+
+fprintf('Saved combined table: %s\n', fullfile(combined_out_folder, 'group_feature_table_combined_v9b.mat'));
+fprintf('Combined rows: %d, columns: %d\n', height(group_table_combined), width(group_table_combined));
+fprintf('KH subjects: %d, RR subjects: %d\n', ...
+    numel(unique(all_handoff_tables{1}.subj_id)), numel(unique(all_handoff_tables{2}.subj_id)));
+
+% -------------------------------------------------------------------------
+%% FRN exclusion summary
+% -------------------------------------------------------------------------
+fprintf('\n=== FRN PEAK EXCLUSION SUMMARY ===\n');
+for i = 1:numel(all_handoff_tables)
+    T = all_handoff_tables{i};
+    cname = char(string(T.cohort(1)));
+    n_total = height(T);
+    n_excl  = sum(T.FRN_excluded);
+    fprintf('  %s: %d/%d trials excluded from FRN_peak (%.1f%%) — FRN_mean_amp still available for all\n', ...
+        cname, n_excl, n_total, 100*n_excl/n_total);
+end
+
+fprintf('\nAll done.\n');
