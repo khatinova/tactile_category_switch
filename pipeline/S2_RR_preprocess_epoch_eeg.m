@@ -63,9 +63,10 @@ switch upper(COHORT)
     otherwise
         error('Unknown COHORT "%s" (use ''KH'' or ''RR'').', COHORT);
 end
-% NOTE: RR raw import / reference handling is wired in PART 1 under
-% `if strcmpi(cohort_import,'mff')`. The 0-30 Hz harmonising filter and
-% per-epoch bad-epoch flagging are applied to BOTH cohorts.
+% NOTE: RR raw import is wired in PART 1 (pop_mffimport on the discovered .mff,
+% then GSN-HydroCel-128 channel locations). The reference (Cz then common
+% average), the 0-30 Hz harmonising filter, and per-epoch bad-epoch flagging
+% are all applied as in KH. cohort_import/cohort_ref_mode below drive this.
 
 % -------------------------------------------------------------------------
 %% USER SWITCHES
@@ -74,17 +75,13 @@ end
 RUN_PREPROCESSING       = true;
 RUN_FEATURE_EXTRACTION  = true;
 
-% RR participant numbers (folders "Nc01", "Nc02", ...). EDIT to match your data.
+% RR subjects are AUTO-DISCOVERED by scanning the four condition subfolders
+% (see PATHS + discover_rr_subjects). You do NOT need to list them by number.
+%   RUN_ALL_VALID_RR = true  -> process every Nc## subject that is found.
+%   RUN_ALL_VALID_RR = false -> process only the Nc numbers in RR_PILOT_ONLY
+%                               (handy for a quick test on one or two subjects).
 RUN_ALL_VALID_RR = true;
-
-RR_VALID_FULL = [1:10];     % <-- EDIT: full RR participant list
-RR_PILOT_ONLY = [1, 2];     % <-- EDIT: quick subset for testing
-
-if RUN_ALL_VALID_RR
-    valid_participants = RR_VALID_FULL;
-else
-    valid_participants = RR_PILOT_ONLY;
-end
+RR_PILOT_ONLY    = [1, 2];   % <-- numbers (Nc01, Nc02 ...) used only when RUN_ALL_VALID_RR=false
 
 save_tables  = true;
 save_figures = true;
@@ -102,6 +99,25 @@ else
 end
 
 eeglab_path = 'C:\Users\khatinova\OneDrive - Nexus365\Pre_2026_Folders\Documents\MATLAB\eeglab2025.1.0';
+
+% -------------------------------------------------------------------------
+% RR raw-data layout.
+% The RR Data tree is split into FOUR task-condition subfolders. Each of the
+% 15 Nc subjects lives in exactly ONE of these, in a folder named like
+% "Nc01_p1_DPDP", which in turn contains the EGI recording as a ".mff" folder.
+% We scan all four subfolders, parse the clean "Nc##" label, and locate the
+% single .mff recording inside each subject folder (see PART 1).
+% -------------------------------------------------------------------------
+RR_CONDITION_SUBFOLDERS = { ...
+    'det_or_prob_and_conf', ...
+    'det_to_prob', ...
+    'deterministic', ...
+    'probabilistic'};
+
+% EGI channel-location file (128-channel HydroCel). Adjust if your EEGLAB
+% plugins live elsewhere.
+egi_chanlocs_file = fullfile(eeglab_path, 'plugins', 'dipfit', 'standard_BEM', ...
+    'elec', 'GSN-HydroCel-128.sfp');
 
 % Cohort-aware data + output roots.
 %   KH raw/results live under 'Salient mod switch KH'
@@ -187,10 +203,13 @@ BURST_MAX_RUN_MS      = 300;
 EPOCH_PTP_SD_THRESH  = 5;
 EPOCH_GRAD_SD_THRESH = 5;
 
-% Subjects with LM/RM mastoids.
+% Subjects with LM/RM mastoids (KH only; RR EGI net has none).
 LMRM_SUBJECT_IDS = [17:23, 27,28];
 
-protect_labels = {'VEOG','HEOG','EOG','TRIGGER','LM','RM'};
+% EGI 128-channel HydroCel: peri-ocular / reference channels to protect from
+% scalp cleaning + average reference (E125-E128 are peri-ocular; VREF/Cz is the
+% online vertex reference). Matches the RR preprocessing reference script.
+protect_labels = {'E125','E126','E127','E128','VREF','Cz'};
 
 % ICLabel auto-rejection threshold.
 ICLABEL_MIN_BRAIN_PROB = 0.50;
@@ -230,31 +249,39 @@ long_burst_log = table();
 
 if RUN_PREPROCESSING
 
-    % Cohort-aware raw-data location and subject-folder glob.
-    if strcmpi(COHORT, 'RR')
-        raw_data_path = RR_data_path;     % defined in PATHS section
-        subj_glob     = 'Nc*';
-        subj_prefix   = 'Nc';
-    else
-        raw_data_path = KH_data_path;
-        subj_glob     = 'Ox*';
-        subj_prefix   = 'Ox';
-    end
+    % ---------------------------------------------------------------------
+    % Build the RR subject registry by scanning all FOUR condition subfolders.
+    %   <RR_data_path>/<condition>/Nc##_p#_<order>/<recording>.mff
+    % Each of the 15 Nc subjects lives in exactly ONE condition subfolder.
+    % See the discover_rr_subjects() local function for the scan/parse logic.
+    % ---------------------------------------------------------------------
+    rr_subjects = discover_rr_subjects(RR_data_path, RR_CONDITION_SUBFOLDERS);
 
-    data_dirs = dir(fullfile(raw_data_path, subj_glob));
-    data_dirs = data_dirs([data_dirs.isdir]);
-    all_subj_names = {data_dirs.name};
+    fprintf('Found %d RR subjects across %d condition subfolders.\n', ...
+        numel(rr_subjects), numel(RR_CONDITION_SUBFOLDERS));
+
+    % Optional subset for testing: when RUN_ALL_VALID_RR is false, keep only
+    % the Nc numbers listed in RR_PILOT_ONLY.
+    if ~RUN_ALL_VALID_RR && ~isempty(rr_subjects)
+        keep = ismember([rr_subjects.num], RR_PILOT_ONLY);
+        rr_subjects = rr_subjects(keep);
+        fprintf('  RUN_ALL_VALID_RR=false -> processing %d pilot subjects.\n', numel(rr_subjects));
+    end
 
     pop_editoptions('option_storedisk', 0);
 
-    for i = valid_participants
+    for s_idx = 1:numel(rr_subjects)
 
-        subjID = sprintf('%s%02d', subj_prefix, i);
-        is_cohort1 = strcmpi(COHORT,'KH') && i <= 8;   % cohort-1 only exists in KH
-        has_LMRM = strcmpi(COHORT,'KH') && ismember(i, LMRM_SUBJECT_IDS);
+        subjID   = rr_subjects(s_idx).nc_label;   % clean 'Nc##' used for all outputs
+        subjPath = rr_subjects(s_idx).subjPath;
+        mff_path = rr_subjects(s_idx).mff_path;
+        i        = rr_subjects(s_idx).num;        % numeric id for hw-filter bookkeeping
+        is_cohort1 = false;   % RR has no cohort-1
+        has_LMRM   = false;   % RR EGI net has no LM/RM mastoids
 
         fprintf('\n======================================================\n');
-        fprintf('PREPROCESSING %s  [cohort %s]\n', subjID, COHORT);
+        fprintf('PREPROCESSING %s  [RR | %s | %s]\n', subjID, ...
+            rr_subjects(s_idx).condition, rr_subjects(s_idx).folder);
         fprintf('======================================================\n');
 
         % -----------------------------------------------------------------
@@ -271,43 +298,25 @@ if RUN_PREPROCESSING
         end
 
         % -----------------------------------------------------------------
-        % Locate raw subject directory.
+        % 1. Import the RR EGI recording (.mff) and load channel locations.
+        %    subjPath / mff_path were resolved in the registry scan above.
         % -----------------------------------------------------------------
-        subj_dir_idx = find(strcmp(all_subj_names, subjID), 1);
-        if isempty(subj_dir_idx)
-            warning('%s: directory not found, skipping.', subjID);
-            continue;
-        end
-
-        subjPath = fullfile(raw_data_path, data_dirs(subj_dir_idx).name);
-
-        % -----------------------------------------------------------------
-        % 1. Load raw data (cohort-specific importer).
-        %    KH: Curry .dat (loadcurry).  RR: EGI .mff (pop_mffimport).
-        %    [RR branch adapted from RRdata_EEG_preprocessing_Jan2026_v1.m;
-        %     verify channel count / reference channel in MATLAB.]
-        % -----------------------------------------------------------------
-        if strcmpi(cohort_import, 'mff')
-            mffFile = dir(fullfile(subjPath, '*.mff'));
-            if isempty(mffFile)
-                warning('%s: no .mff file found, skipping.', subjID);
-                continue;
-            end
-            EEG = pop_mffimport({fullfile(subjPath, mffFile(1).name)}, ...
-                'code', 'eventtype', 'reference', []);
-        else
-            curryFile = dir(fullfile(subjPath, 'Acquisition*.dat'));
-            if isempty(curryFile)
-                warning('%s: no Curry file found, skipping.', subjID);
-                continue;
-            end
-            EEG = loadcurry(fullfile(subjPath, curryFile(1).name), ...
-                'KeepTriggerChannel', 'True', ...
-                'CurryLocations', 'False');
-        end
+        EEG = pop_mffimport(mff_path);
 
         EEG.subject = subjID;
         EEG.etc.hw_filter_label = hw_filter_label;
+        EEG.etc.rr_condition    = rr_subjects(s_idx).condition;
+        EEG.etc.rr_folder       = rr_subjects(s_idx).folder;
+
+        % EGI 128-ch HydroCel channel locations.
+        if exist(egi_chanlocs_file, 'file')
+            EEG = pop_chanedit(EEG, 'lookup', egi_chanlocs_file);
+            EEG = eeg_checkset(EEG);
+            fprintf('  Channel locations loaded.\n');
+        else
+            warning('  EGI chanlocs file not found at %s. Proceeding without explicit locations.', ...
+                egi_chanlocs_file);
+        end
 
         fprintf('  Loaded raw: %d channels, %.1f seconds\n', ...
             EEG.nbchan, EEG.pnts / EEG.srate);
@@ -586,15 +595,10 @@ if RUN_PREPROCESSING
         % -----------------------------------------------------------------
         % 11. Outcome event codes and timing correction.
         % -----------------------------------------------------------------
-        if strcmpi(COHORT, 'RR')
-            % RR (EGI) outcome markers are event strings. 'rewa' = reward shown.
-            % VERIFY against your RR event table; extend if loss has its own code.
-            outcome_codes = {'rewa','puni','corr','inco'};
-        elseif is_cohort1
-            outcome_codes = {'10','11', 10, 11};
-        else
-            outcome_codes = {'31','32','33','34', 31, 32, 33, 34};
-        end
+        % RR (EGI/NetStation) outcome markers. NetStation stores 4-char codes;
+        % 'rewa'/'puni' are 'reward'/'punish' truncated to 4 chars. VERIFY the
+        % exact strings in your MFF (run a trigger count) and extend if needed.
+        outcome_codes = {'rewa','puni'};
 
         should_shift_outcome = ismember(subjID, misaligned_trigger_IDs);
 
@@ -755,9 +759,17 @@ if RUN_FEATURE_EXTRACTION
     fprintf('BUILDING OUTCOME FEATURE TABLES\n');
     fprintf('======================================================\n');
 
-    for participant = valid_participants
+    % Discover the same RR subjects as PART 1 (works even if PART 1 was skipped
+    % this run), then optionally subset to RR_PILOT_ONLY.
+    rr_subjects_feat = discover_rr_subjects(RR_data_path, RR_CONDITION_SUBFOLDERS);
+    if ~RUN_ALL_VALID_RR && ~isempty(rr_subjects_feat)
+        rr_subjects_feat = rr_subjects_feat(ismember([rr_subjects_feat.num], RR_PILOT_ONLY));
+    end
 
-        subj = sprintf('Nc%02d', participant);
+    for s_idx = 1:numel(rr_subjects_feat)
+
+        subj        = rr_subjects_feat(s_idx).nc_label;   % clean 'Nc##'
+        participant = rr_subjects_feat(s_idx).num;
         fprintf('\n============ FEATURE EXTRACTION %s ============\n', subj);
 
         if ~isfield(all_trial_data, subj)
@@ -1269,10 +1281,59 @@ fprintf('\nRR preprocessing + outcome feature construction complete.\n');
 %% LOCAL FUNCTIONS
 % =============================================================================
 
+function rr_subjects = discover_rr_subjects(rr_data_path, condition_subfolders)
+% Scan the RR Data tree (organised by task condition) and return a struct
+% array of subjects. Each of the 15 Nc subjects lives in exactly ONE condition
+% subfolder, in a folder named like "Nc01_p1_DPDP" that contains the EGI
+% recording as a single ".mff" folder. We parse the clean "Nc##" label and
+% locate that .mff. Fields: nc_label, num, condition, folder, subjPath, mff_path.
+
+rr_subjects = struct('nc_label', {}, 'num', {}, 'condition', {}, ...
+                     'folder', {}, 'subjPath', {}, 'mff_path', {});
+
+for cf = 1:numel(condition_subfolders)
+    cond_name = condition_subfolders{cf};
+    cond_path = fullfile(rr_data_path, cond_name);
+    if ~exist(cond_path, 'dir')
+        warning('RR condition subfolder not found: %s', cond_path);
+        continue;
+    end
+
+    subj_dirs = dir(fullfile(cond_path, 'Nc*'));
+    subj_dirs = subj_dirs([subj_dirs.isdir]);
+
+    for sd = 1:numel(subj_dirs)
+        folder_name = subj_dirs(sd).name;                    % 'Nc01_p1_DPDP'
+        nc_label = regexp(folder_name, '^Nc\d+', 'match', 'once');
+        if isempty(nc_label)
+            warning('Could not parse Nc## from folder %s -- skipping.', folder_name);
+            continue;
+        end
+
+        subjPath = fullfile(cond_path, folder_name);
+
+        % The .mff is a NetStation FOLDER inside the subject folder.
+        mff_dirs = dir(fullfile(subjPath, '*.mff'));
+        if isempty(mff_dirs)
+            warning('%s (%s): no .mff folder found -- skipping.', nc_label, cond_name);
+            continue;
+        end
+
+        rr_subjects(end+1) = struct( ...
+            'nc_label', nc_label, ...
+            'num', str2double(regexp(nc_label, '\d+', 'match', 'once')), ...
+            'condition', cond_name, ...
+            'folder', folder_name, ...
+            'subjPath', subjPath, ...
+            'mff_path', fullfile(subjPath, mff_dirs(1).name)); %#ok<AGROW>
+    end
+end
+
+end
+
 function EEG_loaded = load_first_existing_set(folder, candidates)
 
 EEG_loaded = [];
-
 for ci = 1:numel(candidates)
     f = fullfile(folder, candidates{ci});
     if exist(f, 'file')
