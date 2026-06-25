@@ -1,539 +1,256 @@
 % =============================================================================
-% S3_extract_eeg_features.m  (was: EEG_stats_table_formulation_outcome_v3.m)
+% S3_extract_eeg_features.m
 %
-% PIPELINE STEP 3 of 7 — build the EEG feature table from epoched outcome data.
+% PIPELINE STEP 3 of 7 — EXTEND the per-trial EEG feature table built by S2.
 %
-% Loads each subject's outcome .set ONCE and extracts:
-%   PER-TRIAL (single-trial; stored in group_table):
-%     FCz_neg_peak_amp/_norm/_lat   single-trial frontal negativity (min in FRN win)
-%     FCzCz_mean_amp/_norm          FCz/Cz fixed-window mean amplitude
-%     P300_amp/_norm, Theta_amp, PLV_fp/_fs(_pairwise)
-%   PER-STAGE difference waves (in frn_rewp_stage_table):
-%     FRN_amp  = mean over FRN window  of (incorrect - correct)   [negative]
-%     RewP_amp = mean over RewP window of (correct - incorrect)   [positive]
+% S3 does NOT re-extract features and does NOT reload raw/epoched .set files.
+% S2 already loaded each subject's outcome epochs ONCE and produced the full
+% per-trial feature table (N2, FCzCz mean, P300, Theta, PLV) together with the
+% per-trial waveforms, the per-stage summary, and the per-stage FRN/RewP
+% difference-wave table. S3 simply LOADS that S2 output and ADDS the two things
+% S2 leaves out:
 %
-% FRN/RewP are difference waves and CANNOT be single-trial. They are computed
-% per subj_id x block_type x stage via pipeline/utils/kh_compute_frn_rewp_by_stage.m.
+%   (1) WITHIN-SUBJECT Z-SCORES of the canonical single-trial features
+%       (the *_z columns the LME models in S7 expect).
+%   (2) GROUP-LEVEL GRAND-AVERAGE FIGURES:
+%         - correct vs incorrect frontocentral ERP, raw and baseline-RMS
+%           normalised (built from the stored FCzCz_waveform + baseline_rms);
+%         - FRN/RewP difference waves by block type (from frn_rewp_stage_table).
 %
-% INPUTS : group_stage_table_<cohort>.mat (per-trial spine w/ epoch + stage),
-%          + outcome/theta/phase .set epochs (from S2)
-% OUTPUTS: group_stage_table_features_<cohort>.mat  (per-trial features)
-%          frn_rewp_by_stage_<cohort>.mat           (per-stage FRN/RewP)
+% This removes the old duplication: S3 previously reloaded a DIFFERENT spine
+% (group_stage_table_mICA.mat) and recomputed the same features with a
+% mismatched input. It now consumes S2's output directly.
+%
+% INPUT  (per cohort, from S2):
+%   group_feature_table_combined_<COHORT>.mat
+%       -> all_trials_table, stage_feature_table, frn_rewp_stage_table, t_ax
+% OUTPUT (per cohort, for S4):
+%   group_feature_table_<COHORT>_final.mat
+%       -> all_trials_table (now with *_z columns), stage_feature_table,
+%          frn_rewp_stage_table, t_ax
+%   + grand-average figures (PDF/PNG) under Figures/RQ_analysis.
+%
+% Run once per cohort: set COHORT = 'KH' (this file) or use S3_RR for 'RR'.
 % =============================================================================
 
-% clear; close all; clc;
-close all
-
-% Put pipeline utils on the path (subject-id, FRN/RewP helper, figure style)
+clear; close all; clc;
 addpath(genpath(fileparts(mfilename('fullpath'))));
+
 % -------------------------------------------------------------------------
-%% PATHS
+%% COHORT + PATHS
 % -------------------------------------------------------------------------
+COHORT = 'KH';        % 'KH' here; S3_RR sets 'RR'. Everything else is identical.
+tag    = upper(COHORT);
+
+
 remote = 0;
 if remote == 1
     base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch';
 else
-
     base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
 end
 
-epoch_file_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Epoched_data');
-RR_epoch_folder   = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis', 'Epoched_data');
-figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Figures', 'RQ_analysis');
-% if ~exist(figure_output_folder,'dir'), mkdir(figure_output_folder); end
+if strcmpi(COHORT, 'RR')
+    cohort_results = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis');
+else
+    cohort_results = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis');
+end
 
+feature_folder = fullfile(cohort_results, 'Outcome_feature_tables_v4_merged');
+figure_folder  = fullfile(cohort_results, 'Figures', 'RQ_analysis');
+if ~exist(figure_folder, 'dir'), mkdir(figure_folder); end
 
-load(fullfile(epoch_file_folder,'group_stage_table_mICA.mat'), 'group_table');
+% -------------------------------------------------------------------------
+%% LOAD S2 OUTPUT (the single source of truth for features)
+% -------------------------------------------------------------------------
+combined_file = fullfile(feature_folder, sprintf('group_feature_table_combined_%s.mat', tag));
+if ~exist(combined_file, 'file')
+    error(['S3: S2 output not found:\n  %s\n' ...
+           'Run S2 (COHORT=%s) first so the per-trial feature table exists.'], ...
+           combined_file, tag);
+end
+
+S2out = load(combined_file);
+all_trials_table    = S2out.all_trials_table;
+t_ax                = S2out.t_ax;
+if isfield(S2out, 'stage_feature_table');  stage_feature_table  = S2out.stage_feature_table;  else, stage_feature_table  = table(); end
+if isfield(S2out, 'frn_rewp_stage_table'); frn_rewp_stage_table = S2out.frn_rewp_stage_table; else, frn_rewp_stage_table = table(); end
+
+fprintf('S3 (%s): loaded S2 table — %d trials, %d subjects.\n', tag, ...
+    height(all_trials_table), numel(unique(string(all_trials_table.subj_id))));
 
 % -------------------------------------------------------------------------
 %% SETTINGS
 % -------------------------------------------------------------------------
-valid_participants = [3:12, 14:23,27];
 ERP_plot_window = [-200 800];
-rm_baseline     = [-500 0];
+FRN_win  = [250 300];   % shaded on the difference-wave figure (matches S2)
+RewP_win = [250 350];
 
-% Outcome windows (ms)
-FRN_win   = [120 350];
-RewP_win  = [200 400];
-P300_win  = [300 600];
-Theta_win = [200 500];
-PLV_win   = [200 400];
+% Canonical single-trial features to z-score within subject (only those that
+% actually exist in the S2 table are used).
+features_to_zscore = {'N2_amp','N2_norm','FCzCz_mean_amp','FCzCz_mean_norm', ...
+    'P300_amp','P300_norm','Theta_amp', ...
+    'PLV_fp','PLV_fs','PLV_fp_pairwise','PLV_fs_pairwise'};
 
-% Frontocentral ROI for outcome evaluation
-frontocentral_channels = {'FCz','Cz'};
-
-% Other channel groups
-par_channels = {'Pz','P1','P2'};
-acc_channels = {'FCz','Fz','AFz'};
-som_channels = {'C3','C4','CP3','CP1','C5','CP5'};
-
-MIN_TRIALS_PLV = 5;
-MIN_MATCH_RATE = 0.70;
-
-n_rows = height(group_table);
-
-% Feature columns
-group_table.FCz_neg_peak_amp   = nan(n_rows,1);   % single-trial FN (min in FRN win)
-group_table.FCz_neg_peak_norm  = nan(n_rows,1);
-group_table.FCzCz_mean_amp     = nan(n_rows,1);   % FCz/Cz fixed-window mean (per trial)
-group_table.FCzCz_mean_norm    = nan(n_rows,1);
-group_table.P300_amp           = nan(n_rows,1);
-group_table.P300_norm          = nan(n_rows,1);
-group_table.Theta_amp          = nan(n_rows,1);
-group_table.PLV_fp             = nan(n_rows,1);
-group_table.PLV_fs             = nan(n_rows,1);
-group_table.PLV_fp_pairwise    = nan(n_rows,1);
-group_table.PLV_fs_pairwise    = nan(n_rows,1);
-group_table.FCzCz_signal        = cell(n_rows,1);   % per-trial FCz/Cz waveform (for difference waves)
-group_table.P300_signal         = cell(n_rows,1);
-group_table.Theta_signal        = cell(n_rows,1);
-group_table.FCz_neg_peak_lat  = nan(n_rows,1);
-group_table.P300_peak_lat     = nan(n_rows,1);
-
-subj_list = unique(group_table.subj);
-subj_baseline_rms = containers.Map('KeyType','double','ValueType','double');
-
-% Storage for the normalised ERP plot, so no subject files need reloading later
-raw_correct = [];
-raw_incorrect = [];
-norm_correct = [];
-norm_incorrect = [];
-t_global = [];
 
 % -------------------------------------------------------------------------
-%% SINGLE MASTER LOOP: load each subject once
+%% STEP 1: WITHIN-SUBJECT Z-SCORES  (the *_z columns S7's LMEs use)
 % -------------------------------------------------------------------------
-fprintf('Processing subjects in one pass...\n');
+% Unify subject naming first so z-scoring groups by the canonical subj_id.
+all_trials_table = kh_subject_id('standardise', all_trials_table);
 
-for si = valid_participants
-    
-    subj_num = double(si);
-    subj     = sprintf('Ox%02d', subj_num);
-    subj_rows = group_table.subj == categorical(si);
+subj_list = unique(string(all_trials_table.subj_id));
+n_rows = height(all_trials_table);
 
-    fprintf('  %s (%d trials)...\n', subj, sum(subj_rows));
-
-    fname = sprintf('%s_outcome_trimmed.set', subj);
-    fpath = fullfile(epoch_file_folder, fname);
-    if ~exist(fpath,'file')
-        fname = sprintf('%s_outcome.set', subj);
-        fpath = fullfile(epoch_file_folder, fname);
-    end
-
-    % Load outcome .set ONCE
-    EEGp = pop_loadset(fname, epoch_file_folder);
-    if isempty(t_global)
-        t_global = EEGp.times;
-    end
-
-    % Optional theta/phase files
-    theta_fname = sprintf('%s_outcome_theta_trimmed.set', subj);
-    phase_fname = sprintf('%s_outcome_phase_trimmed.set', subj);
-    has_theta = exist(fullfile(epoch_file_folder, theta_fname),'file');
-    has_phase = exist(fullfile(epoch_file_folder, phase_fname),'file');
-
-    theta_fname_untrimmed = sprintf('%s_outcome_theta.set', subj);
-    phase_fname_untrimmed = sprintf('%s_outcome_phase.set', subj);
-
-    if has_theta
-        EEGp_theta = pop_loadset(theta_fname, epoch_file_folder);
-    else
-        EEGp_theta = pop_loadset(theta_fname_untrimmed, epoch_file_folder);
-    end
-    if has_phase
-        EEGp_phase = pop_loadset(phase_fname, epoch_file_folder);
-    else
-        EEGp_phase = pop_loadset(theta_fname_untrimmed, epoch_file_folder);
-    end
-
-    % Channel indices
-    fcz_idx = find(strcmpi({EEGp.chanlocs.labels}, 'FCz'), 1);
-    cz_idx  = find(strcmpi({EEGp.chanlocs.labels}, 'Cz'), 1);
-    par_idx = find(ismember(lower({EEGp.chanlocs.labels}), lower(par_channels)));
-    acc_idx = find(ismember(lower({EEGp.chanlocs.labels}), lower(acc_channels)));
-    som_idx = find(ismember(lower({EEGp.chanlocs.labels}), lower(som_channels)));
-
-    bl_mask   = EEGp.times >= rm_baseline(1) & EEGp.times <= rm_baseline(2);
-    frn_mask  = EEGp.times >= FRN_win(1)  & EEGp.times <= FRN_win(2);
-    rewp_mask = EEGp.times >= RewP_win(1) & EEGp.times <= RewP_win(2);
-    p300_mask = EEGp.times >= P300_win(1) & EEGp.times <= P300_win(2);
-    th_mask   = EEGp.times >= Theta_win(1) & EEGp.times <= Theta_win(2);
-    plv_mask  = EEGp.times >= PLV_win(1)   & EEGp.times <= PLV_win(2);
-    plv_bl    = EEGp.times >= -200 & EEGp.times <= -20;
-
-    % Baseline RMS for this subject from the already-loaded EEGp
-    if ~isempty(fcz_idx)
-        bl_data = squeeze(EEGp.data(fcz_idx, bl_mask, :));
-        bline_rms = rms(bl_data(:));
-        subj_baseline_rms(subj_num) = bline_rms;
-        fprintf('    baseline RMS = %.3f uV\n', bline_rms);
-    else
-        warning('%s: FCz not found, skipping baseline-dependent measures.', subj);
-        bline_rms = NaN;
-    end
-
-    % Trial-wise feature extraction
-    row_indices = find(subj_rows);
-
-    for ri = 1:numel(row_indices)
-        r  = row_indices(ri);
-        ep = group_table.epoch(r);
-        if isnan(ep) || ep < 1 || ep > EEGp.trials
-            continue
-        end
-
-        % ----- Diagnostic FCz negative peak, not called FRN -----
-        if ~isempty(fcz_idx) && ~isnan(bline_rms)
-            sig_fcz = double(EEGp.data(fcz_idx, :, ep));
-            sig_fcz = sig_fcz - mean(sig_fcz(bl_mask), 'omitnan');
-            group_table.FCz_neg_peak_amp(r)  = min(sig_fcz(frn_mask));
-            group_table.FCz_neg_peak_norm(r) = group_table.FCz_neg_peak_amp(r) / bline_rms;
-        end
-
-        if ~isempty(fcz_idx) && ~isempty(cz_idx) && ~isnan(bline_rms)
-            sig_frn = mean(double(EEGp.data([fcz_idx cz_idx], :, ep)), 1, 'omitnan');
-            sig_frn = sig_frn - mean(sig_frn(bl_mask), 'omitnan');
-
-            % FRN_norm and RewP_norm are not microvolts anymore, because
-            % they are baseline corrected!!!
-        
-            group_table.FCzCz_signal{r} = sig_frn;
-            % FCz/Cz fixed-window MEAN amplitude (single-trial, baseline-corrected).
-            % NOTE: this is a single-trial frontocentral mean, NOT the FRN/RewP.
-            % The FRN/RewP difference waves are built per stage below.
-            group_table.FCzCz_mean_amp(r)  = mean(sig_frn(frn_mask), 'omitnan');
-            group_table.FCzCz_mean_norm(r) = group_table.FCzCz_mean_amp(r) / bline_rms;
-        end
-
-        % ----- Diagnostic FCz negative peak, not called FRN -----
-        if ~isempty(fcz_idx) && ~isnan(bline_rms)
-            sig_fcz = double(EEGp.data(fcz_idx, :, ep));
-            sig_fcz = sig_fcz - mean(sig_fcz(bl_mask), 'omitnan');
-        
-            win_vals = sig_fcz(frn_mask);
-            win_t    = EEGp.times(frn_mask);
-        
-            [pk_amp, pk_ix] = min(win_vals, [], 'omitnan');
-            pk_time = win_t(pk_ix);
-        
-            group_table.FCz_neg_peak_amp(r)  = pk_amp;
-            group_table.FCz_neg_peak_norm(r) = pk_amp / bline_rms;
-            group_table.FCz_neg_peak_lat(r)  = pk_time;
-
-            % % Debug figure
-            % if ismember(ep, [1, 15, 30, 45, 60, 78, 141, 206, 255])
-            %     figure; 
-            %     plot(EEGp.times, sig_fcz, 'k-', 'LineWidth', 1); hold on;
-            %     xline(FRN_win(1), 'b--', 'HandleVisibility','off');
-            %     xline(FRN_win(2), 'b--', 'HandleVisibility','off');
-            %     xline(0, 'k:', 'HandleVisibility','off');
-            %     plot(pk_time, pk_amp, 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
-            %     yline(0, 'k:');
-            %     title(sprintf('%s trial %d | FCz negative peak', subj, ep), 'Interpreter','none');
-            %     xlabel('Time (ms)'); ylabel('\muV');
-            %     legend({'Baseline-corrected FCz','FRN window','Peak'}, 'Location', 'best');
-            % 
-            % 
-            %     fprintf('%s trial %d: FCz neg peak = %.3f uV at %.1f ms\n', ...
-            %         subj, ep, pk_amp, pk_time);
-            % end
-        end
-        
-        %% rerun to validate poistioning of P300 window!
-       if ~isempty(par_idx) && ~isnan(bline_rms)
-            sig_par = mean(double(EEGp.data(par_idx, :, ep)), 1, 'omitnan');
-            sig_par = sig_par - mean(sig_par(bl_mask), 'omitnan');
-        
-            win_vals = sig_par(p300_mask);
-            win_t    = EEGp.times(p300_mask);
-        
-            [pk_amp, pk_ix] = max(win_vals, [], 'omitnan');
-            pk_time = win_t(pk_ix);
-        
-            group_table.P300_signal{r} = sig_par;
-            group_table.P300_amp(r)    = pk_amp;
-            group_table.P300_norm(r)   = pk_amp / bline_rms;
-            group_table.P300_peak_lat(r) = pk_time;
-        
-            % Debug plot for selected epochs
-            % if ismember(ep, [1, 15, 30, 45, 60, 78, 141, 206, 255])
-            %     figure; 
-            %     plot(EEGp.times, sig_par, 'k-', 'LineWidth', 1); hold on;
-            %     xline(P300_win(1), 'b--', 'HandleVisibility','off');
-            %     xline(P300_win(2), 'b--', 'HandleVisibility','off');
-            %     xline(0, 'k:', 'HandleVisibility','off');
-            %     plot(pk_time, pk_amp, 'ro', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
-            %     yline(0, 'k:');
-            % 
-            %     title(sprintf('%s trial %d | P300 peak', subj, ep), 'Interpreter','none');
-            %     xlabel('Time (ms)');
-            %     ylabel('\muV');
-            %     legend({'Baseline-corrected parietal trace','P300 window','Peak'}, 'Location', 'best');
-            %     drawnow;
-            % 
-            %     fprintf('%s trial %d: P300 peak = %.3f uV at %.1f ms\n', ...
-            %         subj, ep, pk_amp, pk_time);
-            % end
-        end
-        
-        if ~isempty(EEGp_theta) && ~isempty(acc_idx)
-            sig_th = mean(double(EEGp_theta.data(acc_idx, :, ep)), 1, 'omitnan');
-            env    = abs(hilbert(sig_th));
-            env    = env - mean(env(bl_mask), 'omitnan');
-        
-            group_table.Theta_signal{r} = env;
-            group_table.Theta_amp(r) = mean(env(th_mask), 'omitnan');
-        end
-    end
-
-    % ----- PLV computed per condition -----
-    if ~isempty(EEGp_phase) && ~isempty(acc_idx)
-        cond_combos = unique(group_table(subj_rows, {'block_type','stage','correct','false_fb'}), 'rows');
-        for c = 1:height(cond_combos)
-            bt  = cond_combos.block_type(c);
-            st  = cond_combos.stage(c);
-            cor = cond_combos.correct(c);
-            ff  = cond_combos.false_fb(c);
-
-            cond_mask = subj_rows & ...
-                group_table.block_type == bt & group_table.stage == st & ...
-                group_table.correct == cor & group_table.false_fb == ff;
-            ep_cond = group_table.epoch(cond_mask);
-            ep_cond = ep_cond(~isnan(ep_cond) & ep_cond >= 1 & ep_cond <= EEGp_phase.trials);
-
-            if numel(ep_cond) < MIN_TRIALS_PLV; continue; end
-
-            if ~isempty(par_idx)
-                plv_fp = cross_trial_plv_scalar(EEGp_phase, acc_idx, par_idx, ep_cond, plv_mask, plv_bl);
-                plv_fp_pair = cross_trial_plv_pairwise(EEGp_phase, acc_idx, par_idx, ep_cond, plv_mask, plv_bl);
-                group_table.PLV_fp(cond_mask & ismember(group_table.epoch, ep_cond)) = plv_fp;
-                group_table.PLV_fp_pairwise(cond_mask & ismember(group_table.epoch, ep_cond)) = plv_fp_pair;
-            end
-            if ~isempty(som_idx)
-                plv_fs = cross_trial_plv_scalar(EEGp_phase, acc_idx, som_idx, ep_cond, plv_mask, plv_bl);
-                plv_fs_pair = cross_trial_plv_pairwise(EEGp_phase, acc_idx, som_idx, ep_cond, plv_mask, plv_bl);
-                group_table.PLV_fs(cond_mask & ismember(group_table.epoch, ep_cond)) = plv_fs;
-                group_table.PLV_fs_pairwise(cond_mask & ismember(group_table.epoch, ep_cond)) = plv_fs_pair;
-            end
-        end
-    end
-
-    % Store ERP traces for plotting without reloading files later
-    if ~isempty(fcz_idx) && ~isnan(bline_rms)
-        subj_rows_plot = group_table(group_table.subj == categorical(si) & ~group_table.false_fb, :);
-        ep_c = clean_ep(subj_rows_plot.epoch(subj_rows_plot.correct==1), EEGp);
-        ep_i = clean_ep(subj_rows_plot.epoch(subj_rows_plot.correct==0), EEGp);
-
-        erp_c = bl_correct_erp(EEGp, fcz_idx, ep_c, bl_mask);
-        erp_i = bl_correct_erp(EEGp, fcz_idx, ep_i, bl_mask);
-
-        if ~isempty(erp_c)
-            raw_correct(end+1,:)  = erp_c;
-            norm_correct(end+1,:) = erp_c / bline_rms;
-        end
-        if ~isempty(erp_i)
-            raw_incorrect(end+1,:)  = erp_i;
-            norm_incorrect(end+1,:) = erp_i / bline_rms;
-        end
-    end
-
-    clear EEGp EEGp_theta EEGp_phase
-end
-
-% -------------------------------------------------------------------------
-%% STEP 2: Z-SCORE FEATURES WITHIN SUBJECT (for LME models)
-% -------------------------------------------------------------------------
-fprintf('\nZ-scoring features within subject...\n');
-features_to_zscore = {'FCz_neg_peak_amp','FCz_neg_peak_norm','FCzCz_mean_amp', ...
-    'P300_amp','Theta_amp','PLV_fp','PLV_fs','PLV_fp_pairwise','PLV_fs_pairwise'};
 for f = 1:numel(features_to_zscore)
     fn = features_to_zscore{f};
+    if ~ismember(fn, all_trials_table.Properties.VariableNames); continue; end
+
     fn_z = [fn '_z'];
-    group_table.(fn_z) = nan(n_rows,1);
+    all_trials_table.(fn_z) = nan(n_rows, 1);
+
     for si = 1:numel(subj_list)
-        mask = group_table.subj == subj_list(si);
-        vals = group_table.(fn)(mask);
-        mn = mean(vals,'omitnan');
-        sd = std(vals,'omitnan');
+        mask = string(all_trials_table.subj_id) == subj_list(si);
+        vals = all_trials_table.(fn)(mask);
+        sd   = std(vals, 'omitnan');
         if sd > 0
-            group_table.(fn_z)(mask) = (vals - mn) / sd;
+            all_trials_table.(fn_z)(mask) = (vals - mean(vals, 'omitnan')) / sd;
+        end
+    end
+end
+fprintf('  Added within-subject z-scores for %d features.\n', ...
+    sum(ismember(features_to_zscore, all_trials_table.Properties.VariableNames)));
+
+% -------------------------------------------------------------------------
+%% SAVE the extended table for S4 (per-trial table now carries *_z columns)
+% -------------------------------------------------------------------------
+final_file = fullfile(feature_folder, sprintf('group_feature_table_%s_final.mat', tag));
+save(final_file, 'all_trials_table', 'stage_feature_table', ...
+     'frn_rewp_stage_table', 't_ax', '-v7.3');
+fprintf('  Saved extended table: %s\n', final_file);
+
+
+% -------------------------------------------------------------------------
+%% STEP 2a: GRAND-AVERAGE ERP FIGURE (raw vs baseline-RMS normalised)
+% Built from the per-trial FCzCz_waveform stored by S2 — no .set reload.
+% -------------------------------------------------------------------------
+T = all_trials_table;
+have_wave = ismember('FCzCz_waveform', T.Properties.VariableNames);
+
+raw_correct = []; raw_incorrect = [];
+norm_correct = []; norm_incorrect = [];
+
+if have_wave
+    for si = 1:numel(subj_list)
+        sm = string(T.subj_id) == subj_list(si) & T.has_eeg_epoch & ...
+             ~T.epoch_artifact_flag & ~T.false_fb;
+        if ~any(sm); continue; end
+
+        % Subject baseline RMS (constant per subject; stored per trial by S2).
+        if ismember('baseline_rms', T.Properties.VariableNames)
+            brms = mean(T.baseline_rms(sm), 'omitnan');
+        else
+            brms = NaN;
+        end
+
+        erp_c = mean_waveform(T.FCzCz_waveform(sm & T.correct_num == 1));
+        erp_i = mean_waveform(T.FCzCz_waveform(sm & T.correct_num == 0));
+
+        if ~isempty(erp_c)
+            raw_correct(end+1,:)  = erp_c;                       %#ok<AGROW>
+            norm_correct(end+1,:) = erp_c / max(brms, eps);      %#ok<AGROW>
+        end
+        if ~isempty(erp_i)
+            raw_incorrect(end+1,:)  = erp_i;                     %#ok<AGROW>
+            norm_incorrect(end+1,:) = erp_i / max(brms, eps);    %#ok<AGROW>
         end
     end
 end
 
-% ------------------------------------------------------------------
-% Unify subject naming (canonical subj_id / subj / cohort).
-% ------------------------------------------------------------------
-group_table = kh_subject_id('standardise', group_table);
+if ~isempty(raw_correct) || ~isempty(raw_incorrect)
+    in_w = t_ax >= ERP_plot_window(1) & t_ax <= ERP_plot_window(2);
+    fig_norm = figure('Position', [50 50 1200 500]);
+    sgtitle(sprintf('%s: frontocentral ERP (raw vs baseline-RMS normalised)', tag));
 
-% ------------------------------------------------------------------
-% PER-STAGE FRN / RewP difference waves (canonical FRN/RewP).
-%   FRN_amp  = mean over FRN window  of (incorrect - correct)  [negative]
-%   RewP_amp = mean over RewP window of (correct - incorrect)  [positive]
-% Built from the per-trial FCz/Cz waveforms (FCzCz_signal) + global time axis.
-% ------------------------------------------------------------------
-frn_rewp_opts = struct('wave_col','FCzCz_signal', ...
-                       'FRN_win',[250 300], 'RewP_win',[250 350]);
-frn_rewp_stage_table = kh_compute_frn_rewp_by_stage(group_table, t_global, frn_rewp_opts);
+    subplot(1,2,1); hold on; title('Raw (\muV)');
+    shaded_erp(t_ax(in_w), pick(raw_correct, in_w),   [0.10 0.60 0.10], 'Correct');
+    shaded_erp(t_ax(in_w), pick(raw_incorrect, in_w), [0.70 0.10 0.10], 'Incorrect');
+    xline(0,'k--'); yline(0,'k:'); set(gca,'YDir','reverse');
+    xlabel('Time (ms)'); ylabel('Amplitude (\muV)'); legend('Box','off');
 
-save(fullfile(epoch_file_folder,'group_stage_table_features.mat'), 'group_table', 't_global');
-save(fullfile(epoch_file_folder,'frn_rewp_by_stage.mat'), 'frn_rewp_stage_table');
-fprintf('Saved group_stage_table_features.mat + frn_rewp_by_stage.mat\n');
+    subplot(1,2,2); hold on; title('Normalised (\muV / baseline RMS)');
+    shaded_erp(t_ax(in_w), pick(norm_correct, in_w),   [0.10 0.60 0.10], 'Correct');
+    shaded_erp(t_ax(in_w), pick(norm_incorrect, in_w), [0.70 0.10 0.10], 'Incorrect');
+    xline(0,'k--'); yline(0,'k:'); set(gca,'YDir','reverse');
+    xlabel('Time (ms)'); ylabel('Amplitude (normalised)'); legend('Box','off');
 
-% -------------------------------------------------------------------------
-%% STEP 3: NORMALISED GRAND AVERAGE ERP FIGURE
-% -------------------------------------------------------------------------
-fprintf('\nPlotting normalised vs raw grand averages...\n');
-
-fig_norm = figure('Position',[50 50 1200 500]);
-in_w = t_global >= ERP_plot_window(1) & t_global <= ERP_plot_window(2);
-sgtitle('Effect of baseline-RMS normalisation on grand average ERP');
-
-subplot(1,2,1); hold on; title('Raw (uV)');
-shaded_erp(t_global(in_w), raw_correct(:,in_w),   [0.1 0.6 0.1], 'Correct');
-shaded_erp(t_global(in_w), raw_incorrect(:,in_w), [0.7 0.1 0.1], 'Incorrect');
-xline(0,'k--'); yline(0,'k:');
-xlabel('Time (ms)'); ylabel('Amplitude (uV)'); legend('Box','off');
-
-subplot(1,2,2); hold on; title('Normalised (signal / baseline RMS)');
-for ii = 1:size(norm_correct,1)
-    plot(t_global(in_w), norm_correct(ii,in_w), 'Color', [0.75 0.92 0.75], 'LineWidth', 0.5, 'HandleVisibility','off');
+    apply_fig_style(fig_norm);
+    exportgraphics(fig_norm, fullfile(figure_folder, ...
+        sprintf('Normalisation_comparison_%s.pdf', tag)), 'ContentType', 'vector');
 end
-for ii = 1:size(norm_incorrect,1)
-    plot(t_global(in_w), norm_incorrect(ii,in_w), 'Color', [0.96 0.78 0.78], 'LineWidth', 0.5, 'HandleVisibility','off');
-end
-shaded_erp(t_global(in_w), norm_correct(:,in_w),   [0.1 0.6 0.1], 'Correct');
-shaded_erp(t_global(in_w), norm_incorrect(:,in_w), [0.7 0.1 0.1], 'Incorrect');
-xline(0,'k--'); yline(0,'k:');
-xlabel('Time (ms)'); ylabel('Amplitude (normalised)'); legend('Box','off');
 
-saveas(fig_norm, fullfile(figure_output_folder,'Normalisation_comparison.pdf'));
 
 % -------------------------------------------------------------------------
-%% FRN / RewP GRAND-AVERAGE DIFFERENCE WAVES (canonical RQ1 figure)
+%% STEP 2b: FRN/RewP DIFFERENCE-WAVE GRAND AVERAGES (by block type)
+% Built from frn_rewp_stage_table.diff_wave (incorrect - correct) made by S2.
 % -------------------------------------------------------------------------
-% Grand-average correct vs incorrect FCz/Cz ERP, plus the difference wave
-% (incorrect - correct). The FRN window (negative) and RewP window (positive)
-% are shaded. Difference waves are averaged across the per-stage diff_wave
-% entries built above (true-feedback trials), per block type.
-if exist('frn_rewp_stage_table','var') && ~isempty(frn_rewp_stage_table)
-    fig_fr = figure('Position',[60 60 1100 460]);
-    sgtitle('FRN / RewP difference waves (incorrect - correct), by block type');
-    FRN_win = [250 300]; RewP_win = [250 350];
+if ~isempty(frn_rewp_stage_table) && ismember('diff_wave', frn_rewp_stage_table.Properties.VariableNames)
     bts = {'D','P'};
-    for bi = 1:2
-        ax = subplot(1,2,bi); hold(ax,'on'); title(ax, sprintf('%s blocks', bts{bi}));
+    fig_fr = figure('Position', [60 60 1100 460]);
+    sgtitle(sprintf('%s: FRN/RewP difference waves (incorrect - correct), by block type', tag));
+
+    for bi = 1:numel(bts)
+        ax = subplot(1, numel(bts), bi); hold(ax, 'on'); title(ax, sprintf('%s blocks', bts{bi}));
+
         sel = string(frn_rewp_stage_table.block_type) == bts{bi};
         dw  = frn_rewp_stage_table.diff_wave(sel);
         dw  = dw(~cellfun(@isempty, dw));
         if isempty(dw); continue; end
-        M = cell2mat(cellfun(@(x) x(:)', dw, 'UniformOutput', false));
-        mn = mean(M,1,'omitnan'); se = std(M,0,1,'omitnan')/sqrt(size(M,1));
+
+        M  = cell2mat(cellfun(@(x) x(:)', dw, 'UniformOutput', false));
+        mn = mean(M, 1, 'omitnan');
+        se = std(M, 0, 1, 'omitnan') / sqrt(size(M,1));
         yl = [min(mn)-0.5, max(mn)+0.5];
-        patch(ax,[FRN_win fliplr(FRN_win)],[yl(1) yl(1) yl(2) yl(2)],[0.85 0.9 1],'EdgeColor','none','FaceAlpha',0.4);
-        patch(ax,[RewP_win fliplr(RewP_win)],[yl(1) yl(1) yl(2) yl(2)],[1 0.9 0.85],'EdgeColor','none','FaceAlpha',0.3);
-        fill(ax,[t_global fliplr(t_global)],[mn+se fliplr(mn-se)],[0.2 0.2 0.2],'FaceAlpha',0.15,'EdgeColor','none');
-        plot(ax, t_global, mn, 'k', 'LineWidth', 2);
+
+        patch(ax, [FRN_win fliplr(FRN_win)],  [yl(1) yl(1) yl(2) yl(2)], [0.85 0.90 1.00], 'EdgeColor','none','FaceAlpha',0.4);
+        patch(ax, [RewP_win fliplr(RewP_win)],[yl(1) yl(1) yl(2) yl(2)], [1.00 0.90 0.85], 'EdgeColor','none','FaceAlpha',0.3);
+        fill(ax, [t_ax fliplr(t_ax)], [mn+se fliplr(mn-se)], [0.2 0.2 0.2], 'FaceAlpha',0.15, 'EdgeColor','none');
+        plot(ax, t_ax, mn, 'k', 'LineWidth', 2);
         yline(ax,0,'k:'); xline(ax,0,'k:');
         xlabel(ax,'Time (ms)'); ylabel(ax,'incorrect - correct (\muV)');
-        xlim(ax,[-200 800]); set(ax,'YDir','reverse');   % EEG negative-up
+        xlim(ax, ERP_plot_window); set(ax,'YDir','reverse');   % EEG negative-up
     end
-    if exist('save_fig','file')
-        save_fig(fig_fr, fullfile(figure_output_folder,'FRN_RewP_difference_waves'));
-    else
-        exportgraphics(fig_fr, fullfile(figure_output_folder,'FRN_RewP_difference_waves.pdf'),'ContentType','vector');
-    end
-    fprintf('Saved FRN/RewP difference-wave grand averages.\n');
+
+    apply_fig_style(fig_fr);
+    exportgraphics(fig_fr, fullfile(figure_folder, ...
+        sprintf('FRN_RewP_difference_waves_%s.pdf', tag)), 'ContentType', 'vector');
 end
+
+fprintf('S3 (%s) complete: extended table + grand-average figures saved.\n', tag);
 
 % =========================================================================
 %% LOCAL FUNCTIONS
 % =========================================================================
-
-function plv_mean = cross_trial_plv_scalar(EEGp_phase, ref_idx, tgt_idx, ep, plv_mask, bl_mask)
-% Legacy ROI-collapsed PLV: average phase within each ROI first.
-n_ep = numel(ep);
-if n_ep == 0
-    plv_mean = NaN; return;
+function m = mean_waveform(wave_cells)
+% Grand-average a cell column of equal-length per-trial waveforms.
+wave_cells = wave_cells(~cellfun(@isempty, wave_cells));
+if isempty(wave_cells); m = []; return; end
+M = cell2mat(cellfun(@(x) x(:)', wave_cells, 'UniformOutput', false));
+m = mean(M, 1, 'omitnan');
 end
 
-if isscalar(ref_idx)
-    phi_r = squeeze(double(EEGp_phase.data(ref_idx,:,ep)))';
-else
-    phi_r = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(ref_idx,:,ep))),1,'omitnan')))';
-end
-if isscalar(tgt_idx)
-    phi_t = squeeze(double(EEGp_phase.data(tgt_idx,:,ep)))';
-else
-    phi_t = squeeze(angle(mean(exp(1i*double(EEGp_phase.data(tgt_idx,:,ep))),1,'omitnan')))';
-end
-if isvector(phi_r) && n_ep==1; phi_r=phi_r(:)'; end
-if isvector(phi_t) && n_ep==1; phi_t=phi_t(:)'; end
-
-plv_ts  = abs(mean(exp(1i*(phi_r-phi_t)),1,'omitnan'));
-plv_bl  = mean(plv_ts(bl_mask),'omitnan');
-plv_ts  = plv_ts - plv_bl;
-plv_mean = mean(plv_ts(plv_mask),'omitnan');
+function out = pick(M, cols)
+% Safely column-subset a (possibly empty) grand-average matrix.
+if isempty(M); out = M; else, out = M(:, cols); end
 end
 
-function plv_mean = cross_trial_plv_pairwise(EEGp_phase, ref_idx, tgt_idx, ep, plv_mask, bl_mask)
-% Pairwise-averaged PLV: compute every ref x target pair separately.
-if isempty(ep)
-    plv_mean = NaN; return;
-end
-
-ref_idx = ref_idx(:)';
-tgt_idx = tgt_idx(:)';
-if isempty(ref_idx) || isempty(tgt_idx)
-    plv_mean = NaN; return;
-end
-
-pair_vals = nan(numel(ref_idx) * numel(tgt_idx), 1);
-k = 0;
-for r = 1:numel(ref_idx)
-    for t = 1:numel(tgt_idx)
-        k = k + 1;
-        phi_r = squeeze(double(EEGp_phase.data(ref_idx(r),:,ep)))';
-        phi_t = squeeze(double(EEGp_phase.data(tgt_idx(t),:,ep)))';
-        if isvector(phi_r) && numel(ep)==1; phi_r = phi_r(:)'; end
-        if isvector(phi_t) && numel(ep)==1; phi_t = phi_t(:)'; end
-        plv_ts = abs(mean(exp(1i*(phi_r - phi_t)),1,'omitnan'));
-        plv_bl = mean(plv_ts(bl_mask),'omitnan');
-        plv_ts = plv_ts - plv_bl;
-        pair_vals(k) = mean(plv_ts(plv_mask),'omitnan');
-    end
-end
-
-plv_mean = mean(pair_vals,'omitnan');
-end
-
-function ep = clean_ep(epoch_col, EEGp)
-ep = epoch_col(~isnan(epoch_col) & epoch_col>=1 & epoch_col<=EEGp.trials);
-end
-
-function erp = bl_correct_erp(EEGp, ch_idx, ep, bl_mask)
-if isempty(ep); erp=[]; return; end
-if isscalar(ch_idx)
-    raw = squeeze(EEGp.data(ch_idx,:,ep))';
-else
-    raw = squeeze(mean(EEGp.data(ch_idx,:,ep),1,'omitnan'))';
-end
-if isvector(raw) && numel(ep)==1; raw=raw(:)'; end
-raw = raw - mean(raw(:,bl_mask),2,'omitnan');
-erp = mean(raw,1,'omitnan');
-end
-
-function shaded_erp(ax_or_t, data_or_ax, clr_or_data, lbl_or_clr, lbl)
-% Flexible: shaded_erp(t, data, clr, lbl) called with implicit gca
-if nargin == 4
-    t = ax_or_t; data = data_or_ax; clr = clr_or_data; lbl = lbl_or_clr;
-    ax = gca;
-else
-    ax = ax_or_t; t = data_or_ax; data = clr_or_data; clr = lbl_or_clr;
-end
+function shaded_erp(t, data, clr, lbl)
+% Mean +/- SEM ribbon for a [subjects x time] matrix.
 if isempty(data); return; end
-mn = mean(data,1,'omitnan');
-se = std(data,0,1,'omitnan')/sqrt(size(data,1));
-fill(ax,[t,fliplr(t)],[mn+se,fliplr(mn-se)],clr,'FaceAlpha',0.15,'EdgeColor','none','HandleVisibility','off');
-plot(ax,t,mn,'Color',clr,'LineWidth',2.5,'DisplayName',sprintf('%s (n=%d)',lbl,size(data,1)));
+mn = mean(data, 1, 'omitnan');
+se = std(data, 0, 1, 'omitnan') / sqrt(size(data,1));
+fill([t, fliplr(t)], [mn+se, fliplr(mn-se)], clr, ...
+    'FaceAlpha', 0.15, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+plot(t, mn, 'Color', clr, 'LineWidth', 2.5, ...
+    'DisplayName', sprintf('%s (n=%d)', lbl, size(data,1)));
 end
