@@ -127,10 +127,8 @@ RR_data_path = fullfile(base_path, 'Salient mod switch RR', 'Data');
 
 if strcmpi(COHORT, 'RR')
     cohort_results = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis');
-    behav_data_path = RR_data_path;
 else
     cohort_results = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis');
-    behav_data_path = KH_data_path;
 end
 
 study_filepath  = fullfile(cohort_results, 'Winter 2026');
@@ -149,17 +147,22 @@ addpath(eeglab_path);
 % all_trial_data is built by S1 (behaviour) and is shared across cohorts.
 load(fullfile(KH_data_path, 'all_trial_data_June2026.mat'));
 
-KH_behav_file = fullfile(behav_data_path, 'behav_table_June2026.mat');
-if exist(KH_behav_file, 'file')
-    S_beh = load(KH_behav_file, 'group_T');
+% The behaviour table is a SINGLE combined table (group_T) holding ALL
+% subjects (KH "Ox##" and RR "Nc##"), and it lives in the canonical combined
+% Data folder alongside all_trial_data (the KH Data path). We keep the RR rows
+% by subjID prefix "Nc"; per-subject selection in PART 2 is by exact subjID.
+behav_file = fullfile(KH_data_path, 'behav_table_June2026.mat');
+if exist(behav_file, 'file')
+    S_beh = load(behav_file, 'group_T');
     RR_behav_table = S_beh.group_T;
 else
-    error('behav_table.mat not found at %s', KH_behav_file);
+    error('behav_table.mat not found at %s', behav_file);
 end
 
-if ismember('researcher', RR_behav_table.Properties.VariableNames)
-    RR_behav_table = RR_behav_table(strcmp(string(RR_behav_table.researcher), 'RR'), :);
-end
+% Keep only RR subjects (subjID starts with "Nc").
+RR_behav_table = RR_behav_table(startsWith(string(RR_behav_table.subjID), "Nc"), :);
+fprintf('Behaviour table: %d RR rows across %d RR subjects.\n', ...
+    height(RR_behav_table), numel(unique(string(RR_behav_table.subjID))));
 
 % -------------------------------------------------------------------------
 %% PREPROCESSING PARAMETERS
