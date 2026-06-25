@@ -75,14 +75,49 @@
 %
 % =============================================================================
 
-% ── Assumed to be in workspace (from earlier pipeline steps) ────────────────
-%   group_table_KH, group_table_RR, figure_output_folder
-%   These are assembled exactly as in the commented-out top section.
+% ── PIPELINE STEP 7 of 7 — 5-RQ EEG analysis (S7_eeg_rq_analysis.m) ─────────
+% (was: Stats_Uncertainty_Analysis_EEG_combined_FRN_negpeak_v2.m)
+%
+% Five research questions (see EEG RQs Word doc): RQ1 FN/P300 under uncertainty,
+% RQ2 confidence x FN, RQ3 frontal theta x stage, RQ4 fronto-parietal PLV,
+% RQ5 fronto-parietal vs fronto-somatosensory pathway. Produces LME stats,
+% manuscript-ready tables, and figures (styled via pipeline/utils/apply_fig_style).
+%
+% INPUT : group_feature_table_combined.mat (group_table) from S4.
+%         Optionally frn_rewp_by_stage_combined.mat for FRN/RewP grand averages.
+% OUTPUT: RQ figures + manuscript_stats.txt in figure_output_folder.
+% -----------------------------------------------------------------------------
+addpath(genpath(fileparts(mfilename('fullpath'))));   % pipeline utils on path
 
-% ─── Re-assemble combined table (uncomment if running fresh) ─────────────────
-% vars = group_table_KH.Properties.VariableNames;
-% group_table_RR_aligned = group_table_RR(:, vars);
-% group_table = [group_table_KH; group_table_RR_aligned];
+remote = 0;
+if remote == 1
+    base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch';
+else
+    base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
+end
+epoch_file_folder    = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Epoched_data');
+figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Figures', 'RQ_analysis_combined_data');
+if ~exist(figure_output_folder, 'dir'), mkdir(figure_output_folder); end
+
+% Load the combined KH+RR feature table (from S4) unless already in workspace.
+if ~exist('group_table', 'var')
+    load(fullfile(epoch_file_folder, 'group_feature_table_combined.mat'), 'group_table');
+end
+
+% Figure styling defaults (ticks outside, no top/right box) applied to every
+% axes created below; matches pipeline/utils/apply_fig_style.
+set(groot, 'defaultAxesTickDir', 'out');
+set(groot, 'defaultAxesBox', 'off');
+set(groot, 'defaultAxesTickDirMode', 'manual');
+
+% Backward-compatibility: some RQ4 code references block_number; alias to block.
+if ~ismember('block_number', group_table.Properties.VariableNames)
+    if ismember('block', group_table.Properties.VariableNames)
+        group_table.block_number = kh_to_numeric(group_table.block);
+    elseif ismember('blocknum', group_table.Properties.VariableNames)
+        group_table.block_number = kh_to_numeric(group_table.blocknum);
+    end
+end
 
 % ─── Ensure categorical types ────────────────────────────────────────────────
 group_table.subj_id         = categorical(group_table.subj_id);

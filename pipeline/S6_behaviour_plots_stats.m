@@ -57,7 +57,28 @@
 %               optional:     stay_choice, prevCorrect  (for Fig S5)
 % ==========================================================================
 
+% ==========================================================================
+% S6_behaviour_plots_stats.m  (was: B_plot_task_stage_behaviour.m)
+%
+% PIPELINE STEP 6 of 7 — behavioural figures + statistics.
+%
+% Stage-based performance, confidence, RT and stay behaviour, with a focus on:
+%   * block TRANSITIONS (D->D, D->P, P->D, P->P)  [Fig S6]
+%   * cumulative prior uncertainty n_prev_P        [new section at end]
+%   * behaviour around the reversal (LE vs RN)
+% Plus LME statistics for the key questions (reversal cost x transition;
+% accuracy/confidence ~ stage x n_prev_P).
+%
+% INPUT  : behav_table.mat (group_T) — ideally the RL-enriched
+%          behav_table_RL.mat (from S5) so model latents are available.
+% OUTPUT : figures (Fig S1..S7 + n_prev_P) and printed LME tables.
+%
+% Figures use pipeline/utils/apply_fig_style (ticks outside, no top/right box,
+% poster/thesis-quality formatting) via save_fig.
+% ==========================================================================
+
 %% ─── SETTINGS ─────────────────────────────────────────────────────────────
+addpath(genpath(fileparts(mfilename('fullpath'))));   % pipeline utils on path
 set(groot, 'defaultAxesTickDir', 'out');
 set(groot, 'defaultAxesBox', 'off');
 
@@ -86,7 +107,22 @@ cd(base_path)
 
 
 
-load(fullfile(base_path, 'Data', 'behav_table_June2026.mat'))
+% Prefer the RL-enriched behaviour table (S5) so model latents are available;
+% fall back to the plain behaviour table.
+beh_candidates = { ...
+    fullfile(base_path, 'Data', 'behav_table_RL.mat'), ...
+    fullfile(base_path, 'Data', 'behav_table_June2026_RL.mat'), ...
+    fullfile(base_path, 'Data', 'behav_table_June2026.mat'), ...
+    fullfile(base_path, 'Data', 'behav_table.mat')};
+loaded_beh = false;
+for ci = 1:numel(beh_candidates)
+    if exist(beh_candidates{ci}, 'file')
+        load(beh_candidates{ci}, 'group_T');
+        fprintf('Loaded behaviour table: %s\n', beh_candidates{ci});
+        loaded_beh = true; break;
+    end
+end
+if ~loaded_beh; error('No behaviour table found in %s/Data.', base_path); end
 
 
 %% ─── PREPROCESS group_T ───────────────────────────────────────────────────
@@ -840,6 +876,121 @@ for mi = 1:numel(measures)
 end
 
 fprintf('\nAll stage figures saved to:\n  %s\n', outpath);
+
+
+% =========================================================================
+%% NEW: CUMULATIVE PRIOR UNCERTAINTY (n_prev_P) + TRANSITION STATISTICS
+% =========================================================================
+% Builds prev_block_type, transition (D->D/D->P/P->D/P->P) and n_prev_P
+% (number of probabilistic blocks seen earlier in the session) per subject,
+% then (1) plots reversal cost and post-reversal accuracy by transition and by
+% n_prev_P, and (2) runs LMEs for the key questions:
+%   acc ~ stage * transition + (1|subj)         (reversal dynamics x history)
+%   acc ~ stage * n_prev_P  + (1|subj)          (cumulative uncertainty)
+% Requires the per-trial group_T already loaded above.
+
+GT = group_T;
+GT.subj_id_s = string(GT.subjID);
+GT.block     = double(GT.block);
+GT.correct   = double(GT.correct);
+GT.block_type_clean = string(GT.block_type);
+GT.block_type_clean(GT.block_type_clean == "V") = "P";
+
+% Derive prev_block_type / transition / n_prev_P per subject x block.
+GT.prev_block_type = strings(height(GT),1);
+GT.transition2     = strings(height(GT),1);
+GT.n_prev_P        = nan(height(GT),1);
+subs = unique(GT.subj_id_s);
+for si = 1:numel(subs)
+    sm = GT.subj_id_s == subs(si);
+    blks = sort(unique(GT.block(sm))');
+    for bi = 1:numel(blks)
+        b = blks(bi); bm = sm & GT.block == b;
+        curr = GT.block_type_clean(find(bm,1));
+        if bi == 1
+            prev = "first"; trans = "first"; nP = 0;
+        else
+            prevb = blks(bi-1);
+            prev  = GT.block_type_clean(find(sm & GT.block==prevb,1));
+            trans = prev + "->" + curr;
+            priorP = 0;
+            for pb = blks(1:bi-1)
+                if GT.block_type_clean(find(sm & GT.block==pb,1)) == "P", priorP = priorP+1; end
+            end
+            nP = priorP;
+        end
+        GT.prev_block_type(bm) = prev;
+        GT.transition2(bm)     = trans;
+        GT.n_prev_P(bm)        = nP;
+    end
+end
+
+% Bring in the per-trial stage labels assigned earlier (group_T.stage).
+GT.stage = group_T.stage;
+
+% ---- LME 1: accuracy ~ stage * transition ----
+lme_tbl = GT(ismember(GT.stage, {'LN','LE','RN','RE'}) & GT.transition2 ~= "first", :);
+lme_tbl.subj_id     = categorical(lme_tbl.subj_id_s);
+lme_tbl.stage       = categorical(string(lme_tbl.stage), {'LN','LE','RN','RE'});
+lme_tbl.transition2 = categorical(lme_tbl.transition2, {'D->D','D->P','P->D','P->P'});
+try
+    mdl_trans = fitglme(lme_tbl, 'correct ~ stage * transition2 + (1|subj_id)', ...
+        'Distribution','Binomial','Link','logit');
+    fprintf('\n=== LME: accuracy ~ stage * transition ===\n'); disp(mdl_trans.Coefficients);
+catch ME
+    warning('Transition LME failed: %s', ME.message);
+end
+
+% ---- LME 2: accuracy ~ stage * n_prev_P ----
+lme_tbl.n_prev_P_z = (lme_tbl.n_prev_P - mean(lme_tbl.n_prev_P,'omitnan')) ./ std(lme_tbl.n_prev_P,'omitnan');
+try
+    mdl_nprevP = fitglme(lme_tbl, 'correct ~ stage * n_prev_P_z + (1|subj_id)', ...
+        'Distribution','Binomial','Link','logit');
+    fprintf('\n=== LME: accuracy ~ stage * n_prev_P ===\n'); disp(mdl_nprevP.Coefficients);
+catch ME
+    warning('n_prev_P LME failed: %s', ME.message);
+end
+
+% ---- Figure: reversal cost (LE - RN accuracy) by transition and by n_prev_P ----
+fig_np = figure('Position',[60 60 1100 440]);
+sgtitle('Reversal dynamics by experienced uncertainty');
+
+% Panel A: post-reversal (RN) accuracy by transition
+axA = subplot(1,2,1); hold(axA,'on'); title(axA,'RN accuracy by transition');
+tt = {'D->D','D->P','P->D','P->P'};
+for k = 1:4
+    v = [];
+    for si = 1:numel(subs)
+        m = lme_tbl.subj_id == categorical(subs(si)) & lme_tbl.transition2==tt{k} & lme_tbl.stage=='RN';
+        if any(m), v(end+1) = mean(lme_tbl.correct(m),'omitnan'); end %#ok<AGROW>
+    end
+    bar(axA, k, mean(v,'omitnan'), 0.6, 'FaceColor',[0.3 0.5 0.75]);
+    errorbar(axA, k, mean(v,'omitnan'), std(v,'omitnan')/sqrt(max(numel(v),1)), 'k.','LineWidth',1.2);
+end
+set(axA,'XTick',1:4,'XTickLabel',tt); ylabel(axA,'P(correct) at RN'); ylim(axA,[0 1]);
+
+% Panel B: RN accuracy by n_prev_P
+axB = subplot(1,2,2); hold(axB,'on'); title(axB,'RN accuracy by prior P exposure');
+np_levels = unique(lme_tbl.n_prev_P(~isnan(lme_tbl.n_prev_P)))';
+for k = 1:numel(np_levels)
+    v = [];
+    for si = 1:numel(subs)
+        m = lme_tbl.subj_id==categorical(subs(si)) & lme_tbl.n_prev_P==np_levels(k) & lme_tbl.stage=='RN';
+        if any(m), v(end+1) = mean(lme_tbl.correct(m),'omitnan'); end %#ok<AGROW>
+    end
+    bar(axB, k, mean(v,'omitnan'), 0.6, 'FaceColor',[0.80 0.40 0.20]);
+    errorbar(axB, k, mean(v,'omitnan'), std(v,'omitnan')/sqrt(max(numel(v),1)), 'k.','LineWidth',1.2);
+end
+set(axB,'XTick',1:numel(np_levels),'XTickLabel',string(np_levels));
+xlabel(axB,'# previous P blocks'); ylabel(axB,'P(correct) at RN'); ylim(axB,[0 1]);
+
+if exist('save_fig','file')
+    save_fig(fig_np, fullfile(outpath,'figS8_reversal_by_uncertainty'));
+else
+    apply_fig_style(fig_np);
+    exportgraphics(fig_np, fullfile(outpath,'figS8_reversal_by_uncertainty.pdf'),'ContentType','vector');
+end
+fprintf('Fig S8 (n_prev_P / transition) saved.\n');
 
 
 % =========================================================================

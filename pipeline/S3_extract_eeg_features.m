@@ -409,6 +409,43 @@ xlabel('Time (ms)'); ylabel('Amplitude (normalised)'); legend('Box','off');
 
 saveas(fig_norm, fullfile(figure_output_folder,'Normalisation_comparison.pdf'));
 
+% -------------------------------------------------------------------------
+%% FRN / RewP GRAND-AVERAGE DIFFERENCE WAVES (canonical RQ1 figure)
+% -------------------------------------------------------------------------
+% Grand-average correct vs incorrect FCz/Cz ERP, plus the difference wave
+% (incorrect - correct). The FRN window (negative) and RewP window (positive)
+% are shaded. Difference waves are averaged across the per-stage diff_wave
+% entries built above (true-feedback trials), per block type.
+if exist('frn_rewp_stage_table','var') && ~isempty(frn_rewp_stage_table)
+    fig_fr = figure('Position',[60 60 1100 460]);
+    sgtitle('FRN / RewP difference waves (incorrect - correct), by block type');
+    FRN_win = [250 300]; RewP_win = [250 350];
+    bts = {'D','P'};
+    for bi = 1:2
+        ax = subplot(1,2,bi); hold(ax,'on'); title(ax, sprintf('%s blocks', bts{bi}));
+        sel = string(frn_rewp_stage_table.block_type) == bts{bi};
+        dw  = frn_rewp_stage_table.diff_wave(sel);
+        dw  = dw(~cellfun(@isempty, dw));
+        if isempty(dw); continue; end
+        M = cell2mat(cellfun(@(x) x(:)', dw, 'UniformOutput', false));
+        mn = mean(M,1,'omitnan'); se = std(M,0,1,'omitnan')/sqrt(size(M,1));
+        yl = [min(mn)-0.5, max(mn)+0.5];
+        patch(ax,[FRN_win fliplr(FRN_win)],[yl(1) yl(1) yl(2) yl(2)],[0.85 0.9 1],'EdgeColor','none','FaceAlpha',0.4);
+        patch(ax,[RewP_win fliplr(RewP_win)],[yl(1) yl(1) yl(2) yl(2)],[1 0.9 0.85],'EdgeColor','none','FaceAlpha',0.3);
+        fill(ax,[t_global fliplr(t_global)],[mn+se fliplr(mn-se)],[0.2 0.2 0.2],'FaceAlpha',0.15,'EdgeColor','none');
+        plot(ax, t_global, mn, 'k', 'LineWidth', 2);
+        yline(ax,0,'k:'); xline(ax,0,'k:');
+        xlabel(ax,'Time (ms)'); ylabel(ax,'incorrect - correct (\muV)');
+        xlim(ax,[-200 800]); set(ax,'YDir','reverse');   % EEG negative-up
+    end
+    if exist('save_fig','file')
+        save_fig(fig_fr, fullfile(figure_output_folder,'FRN_RewP_difference_waves'));
+    else
+        exportgraphics(fig_fr, fullfile(figure_output_folder,'FRN_RewP_difference_waves.pdf'),'ContentType','vector');
+    end
+    fprintf('Saved FRN/RewP difference-wave grand averages.\n');
+end
+
 % =========================================================================
 %% LOCAL FUNCTIONS
 % =========================================================================
