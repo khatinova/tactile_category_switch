@@ -867,8 +867,9 @@ if RUN_FEATURE_EXTRACTION
             using_trimmed_file = EEGp.trials <= numel(valid_ep) || ...
                 exist(fullfile(epoch_outpath, sprintf('%s_outcome_trimmed.set', subj)), 'file');
 
-            trial2epoch = remap_trial2epoch_to_loaded_file( ...
-                trial2epoch_raw, valid_ep, EEGp.trials, using_trimmed_file);
+            % FIXED: trial2epoch_raw is already correct for the loaded file
+            % No remapping needed - KH_align_epochs_with_offset created the correct mapping
+            trial2epoch = trial2epoch_raw;
 
             if isfield(S2, 'hw_filter_label') && ~isempty(S2.hw_filter_label)
                 hw_filter_label_subj = normalize_hw_filter_label(S2.hw_filter_label);

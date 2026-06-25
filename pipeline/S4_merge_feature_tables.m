@@ -29,20 +29,26 @@ else
     base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
 end
 
-KH_epoch_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Epoched_data');
-RR_epoch_folder = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis', 'Epoched_data');
-out_folder      = KH_epoch_folder;
+% Updated paths for pipeline structure
+KH_feature_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Outcome_feature_tables_v4_merged');
+RR_feature_folder = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis', 'Outcome_feature_tables_v4_merged');
+KH_epoch_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Epoched_data_noisefiltering');
+RR_epoch_folder = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis', 'Epoched_data_noisefiltering');
+out_folder      = KH_feature_folder;
 
-% Canonical per-trial feature list to z-score within subject.
-features_to_zscore = {'FCz_neg_peak_amp','FCz_neg_peak_norm','FCzCz_mean_amp', ...
+% Updated feature table names for the new pipeline structure
+features_to_zscore = {'E11E7_mean_amp','E11E7_peak_amp','FCzCz_mean_amp','FCz_neg_peak_amp','FCz_neg_peak_norm', ...
                       'P300_amp','P300_norm','Theta_amp', ...
                       'PLV_fp','PLV_fs','PLV_fp_pairwise','PLV_fs_pairwise'};
 
 % -------------------------------------------------------------------------
 %% LOAD + PREP EACH COHORT
 % -------------------------------------------------------------------------
-group_table_KH = load_features(fullfile(KH_epoch_folder, 'group_stage_table_features.mat'));
+% Load KH and RR feature tables from pipeline locations (with enhanced RR features)
+group_table_KH = load_features(fullfile(KH_feature_folder, 'KH_outcome_all_trials_v4_merged.mat'));
 group_table_RR = load_features({ ...
+    fullfile(RR_feature_folder, 'RR_outcome_all_trials_v4_merged_enhanced.mat'), ...
+    fullfile(RR_feature_folder, 'RR_outcome_all_trials_v4_merged.mat'), ...
     fullfile(RR_epoch_folder, 'group_stage_table_features_RR.mat'), ...
     fullfile(RR_epoch_folder, 'group_stage_table_features.mat'), ...
     fullfile(RR_epoch_folder, 'group_stage_table_RR_v7.mat')});
@@ -106,8 +112,14 @@ fprintf('Saved combined table: %d rows, %d cols (%d KH + %d RR subjects).\n', ..
 % -------------------------------------------------------------------------
 %% (Optional) merge the per-stage FRN/RewP difference-wave tables too
 % -------------------------------------------------------------------------
-frn_KH = try_load_frn(fullfile(KH_epoch_folder, 'frn_rewp_by_stage.mat'));
-frn_RR = try_load_frn(fullfile(RR_epoch_folder, 'frn_rewp_by_stage.mat'));
+% Load stage-level FRN/RewP tables from pipeline locations (enhanced versions)
+frn_KH = try_load_frn({ ...
+    fullfile(KH_feature_folder, 'KH_outcome_stage_features_v4_merged.mat'), ...
+    fullfile(KH_epoch_folder, 'frn_rewp_by_stage.mat')});
+frn_RR = try_load_frn({ ...
+    fullfile(RR_feature_folder, 'RR_frn_rewp_by_stage.mat'), ...
+    fullfile(RR_feature_folder, 'RR_outcome_stage_features_v4_merged.mat'), ...
+    fullfile(RR_epoch_folder, 'frn_rewp_by_stage.mat')});
 if ~isempty(frn_KH) || ~isempty(frn_RR)
     frn_rewp_stage_table = [frn_KH; frn_RR];
     save(fullfile(out_folder, 'frn_rewp_by_stage_combined.mat'), 'frn_rewp_stage_table');
@@ -118,14 +130,15 @@ end
 %% LOCAL FUNCTIONS
 % =========================================================================
 function T = load_features(paths)
-% Load the first existing file and return its group_table.
+% Load the first existing file and return its feature table.
 if ischar(paths) || isstring(paths); paths = {char(paths)}; end
 for i = 1:numel(paths)
     if exist(paths{i}, 'file')
         S = load(paths{i});
+        if isfield(S, 'all_trials_table'); T = S.all_trials_table; return; end
         if isfield(S, 'group_table'); T = S.group_table; return; end
         fn = fieldnames(S);
-        T = S.(fn{1}); return;   % first variable as fallback
+        if ~isempty(fn); T = S.(fn{1}); return; end   % first variable as fallback
     end
 end
 error('S4: no feature table found among: %s', strjoin(string(paths), ', '));
@@ -162,10 +175,16 @@ else
 end
 end
 
-function frn = try_load_frn(path)
+function frn = try_load_frn(paths)
 frn = table();
-if exist(path, 'file')
-    S = load(path);
-    if isfield(S, 'frn_rewp_stage_table'); frn = S.frn_rewp_stage_table; end
+if ischar(paths) || isstring(paths); paths = {char(paths)}; end
+for i = 1:numel(paths)
+    if exist(paths{i}, 'file')
+        S = load(paths{i});
+        if isfield(S, 'frn_rewp_stage_table'); frn = S.frn_rewp_stage_table; return; end
+        if isfield(S, 'stage_feature_table'); frn = S.stage_feature_table; return; end
+        fn = fieldnames(S);
+        if ~isempty(fn); frn = S.(fn{1}); return; end   % first variable as fallback
+    end
 end
 end
