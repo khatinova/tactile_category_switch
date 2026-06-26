@@ -72,7 +72,7 @@ end
 %% USER SWITCHES
 % -------------------------------------------------------------------------
 
-RUN_PREPROCESSING       = true;
+RUN_PREPROCESSING       = false;
 RUN_FEATURE_EXTRACTION  = true;
 
 RUN_ALL_VALID_KH = true;
@@ -756,6 +756,7 @@ if RUN_FEATURE_EXTRACTION
     fprintf('======================================================\n');
 
     for participant = valid_participants
+        
 
         subj = sprintf('Ox%02d', participant);
         fprintf('\n============ FEATURE EXTRACTION %s ============\n', subj);
