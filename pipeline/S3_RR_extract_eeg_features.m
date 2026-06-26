@@ -1,36 +1,19 @@
 % =============================================================================
-% S3_extract_eeg_features.m
+% S3_RR_extract_eeg_features.m  (RR cohort)
 %
-% PIPELINE STEP 3 of 7 — EXTEND the per-trial EEG feature table built by S2.
+% PIPELINE STEP 3 of 7 (RR) — EXTEND the per-trial EEG feature table built by
+% S2_RR. This is the RR twin of S3_extract_eeg_features.m and is IDENTICAL to
+% it except COHORT = 'RR'. The body is channel-agnostic: it only reads the
+% features and waveforms S2_RR already stored, so no EGI electrode labels are
+% needed here and nothing is recomputed.
 %
-% S3 does NOT re-extract features and does NOT reload raw/epoched .set files.
-% S2 already loaded each subject's outcome epochs ONCE and produced the full
-% per-trial feature table (N2, FCzCz mean, P300, Theta, PLV) together with the
-% per-trial waveforms, the per-stage summary, and the per-stage FRN/RewP
-% difference-wave table. S3 simply LOADS that S2 output and ADDS the two things
-% S2 leaves out:
+% S3_RR LOADS S2_RR's output and ADDS the two things S2 leaves out:
+%   (1) WITHIN-SUBJECT Z-SCORES of the canonical single-trial features (*_z).
+%   (2) GROUP-LEVEL GRAND-AVERAGE FIGURES (raw vs baseline-RMS normalised ERP;
+%       FRN/RewP difference waves by block type).
 %
-%   (1) WITHIN-SUBJECT Z-SCORES of the canonical single-trial features
-%       (the *_z columns the LME models in S7 expect).
-%   (2) GROUP-LEVEL GRAND-AVERAGE FIGURES:
-%         - correct vs incorrect frontocentral ERP, raw and baseline-RMS
-%           normalised (built from the stored FCzCz_waveform + baseline_rms);
-%         - FRN/RewP difference waves by block type (from frn_rewp_stage_table).
-%
-% This removes the old duplication: S3 previously reloaded a DIFFERENT spine
-% (group_stage_table_mICA.mat) and recomputed the same features with a
-% mismatched input. It now consumes S2's output directly.
-%
-% INPUT  (per cohort, from S2):
-%   group_feature_table_combined_<COHORT>.mat
-%       -> all_trials_table, stage_feature_table, frn_rewp_stage_table, t_ax
-% OUTPUT (per cohort, for S4):
-%   group_feature_table_<COHORT>_final.mat
-%       -> all_trials_table (now with *_z columns), stage_feature_table,
-%          frn_rewp_stage_table, t_ax
-%   + grand-average figures (PDF/PNG) under Figures/RQ_analysis.
-%
-% Run once per cohort: set COHORT = 'KH' (this file) or use S3_RR for 'RR'.
+% INPUT  : group_feature_table_combined_RR.mat   (from S2_RR)
+% OUTPUT : group_feature_table_RR_final.mat       (for S4) + figures.
 % =============================================================================
 
 clear; close all; clc;
@@ -39,7 +22,7 @@ addpath(genpath(fileparts(mfilename('fullpath'))));
 % -------------------------------------------------------------------------
 %% COHORT + PATHS
 % -------------------------------------------------------------------------
-COHORT = 'KH';        % 'KH' here; S3_RR sets 'RR'. Everything else is identical.
+COHORT = 'RR';        % RR cohort. Body is identical to S3 (channel-agnostic: it only reads S2's stored features).
 tag    = upper(COHORT);
 
 
