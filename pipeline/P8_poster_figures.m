@@ -84,26 +84,54 @@ outdir     = fullfile(kh_results, 'Figures', 'Poster_P8');
 if ~exist(outdir, 'dir'), mkdir(outdir); end
 
 %% ─── LOAD COMBINED EEG TABLE (from S4) ──────────────────────────────────────
-gt = load_first_var({ ...
-    fullfile(feat_dir,   'group_feature_table_combined.mat'), ...
-    fullfile(kh_results, 'Epoched_data', 'group_feature_table_combined.mat'), ...
-    fullfile(kh_results, 'Epoched_data_noisefiltering', 'group_feature_table_combined.mat')}, ...
-    'group_table');
-if isempty(gt)
-    error('P8: combined EEG table not found. Run S4_merge_feature_tables first.');
-end
-fprintf('P8: loaded EEG table — %d trials, %d subjects.\n', ...
-    height(gt), numel(unique(string(gt.subj_id))));
+% These are the TWO files P8 runs on, in feat_dir (your path:
+%   ...\Salient mod switch KH\Results\EEG analysis\Outcome_feature_tables_v4_merged ).
+combined_file = fullfile(feat_dir, 'group_feature_table_combined.mat');
+frn_file      = fullfile(feat_dir, 'frn_rewp_by_stage_combined.mat');
 
-% FRN/RewP difference-wave table + a time axis (optional; for the ERP panel).
-frn_tbl = load_first_var({ ...
-    fullfile(feat_dir,   'frn_rewp_by_stage_combined.mat'), ...
-    fullfile(feat_dir,   'group_feature_table_KH_final.mat'), ...
-    fullfile(feat_dir,   'group_feature_table_combined_KH.mat')}, ...
-    'frn_rewp_stage_table');
-t_ax = load_first_var({ ...
-    fullfile(feat_dir, 'group_feature_table_KH_final.mat'), ...
-    fullfile(feat_dir, 'group_feature_table_combined_KH.mat')}, 't_ax');
+% (1) Per-trial feature table  ->  variable 'group_table'
+if ~exist(combined_file, 'file')
+    error('P8: not found:\n  %s\nRun S4_merge_feature_tables first.', combined_file);
+end
+S = load(combined_file);
+if isfield(S, 'group_table')
+    gt = S.group_table;
+else
+    fn = fieldnames(S);  gt = S.(fn{1});   % fallback: first stored variable
+    warning('P8: ''group_table'' not in %s; using ''%s'' instead.', combined_file, fn{1});
+end
+fprintf('P8: loaded %s\n     (%d rows, %d subjects)\n', ...
+    combined_file, height(gt), numel(unique(string(gt.subj_id))));
+
+% (2) FRN/RewP per-stage difference-wave table  ->  variable 'frn_rewp_stage_table'
+frn_tbl = [];
+if exist(frn_file, 'file')
+    Sf = load(frn_file);
+    if isfield(Sf, 'frn_rewp_stage_table')
+        frn_tbl = Sf.frn_rewp_stage_table;
+    else
+        fn = fieldnames(Sf);  frn_tbl = Sf.(fn{1});
+    end
+    fprintf('P8: loaded %s\n', frn_file);
+else
+    warning('P8: %s not found; ERP difference-wave panels will be skipped.', frn_file);
+end
+
+% (3) Time axis for the difference waves.
+%     Neither .mat stores a time vector, so reconstruct it from the
+%     difference-wave length using the S2 outcome epoch window below.
+%     EDIT OUTCOME_WINDOW_MS if your outcome epochs span a different window.
+OUTCOME_WINDOW_MS = [-500 2000];           % S2 outcome_window = [-0.5 2.0] s
+t_ax = [];
+if ~isempty(frn_tbl) && ismember('diff_wave', frn_tbl.Properties.VariableNames)
+    dw = frn_tbl.diff_wave(~cellfun(@isempty, frn_tbl.diff_wave));
+    if ~isempty(dw)
+        L    = numel(dw{1});
+        t_ax = linspace(OUTCOME_WINDOW_MS(1), OUTCOME_WINDOW_MS(2), L);
+        fprintf('P8: reconstructed time axis: %d samples, %g to %g ms.\n', ...
+            L, OUTCOME_WINDOW_MS(1), OUTCOME_WINDOW_MS(2));
+    end
+end
 
 
 %% ─── PREPROCESS TABLE ───────────────────────────────────────────────────────
