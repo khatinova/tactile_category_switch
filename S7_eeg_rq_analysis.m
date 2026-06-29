@@ -1,77 +1,24 @@
 % =============================================================================
-% RQ STATISTICAL ANALYSIS — CORRECTED VERSION
+% S7_eeg_rq_analysis.m  — PIPELINE STEP 7 of 7 (canonical)
 %
-% BUGS FIXED vs original:
+% Canonical version: consolidated from S7_eeg_rq_analysis.m,
+% S7_flexible_plot_scale, S7c_transitions, S7d_no_line_options,
+% S7d_sigstars, S7d_sigstars_RQ2extended, and S7d_sigstars_prefrontal_mean.
+% Supersedes all those files.
 %
-%  BUG 1 — gt_plv.trueFB == 1 (line ~RQ4)
-%     The group_table has no column called 'trueFB'. The stage_table pipeline
-%     stores feedback validity as 'false_fb' (logical, true = feedback was
-%     flipped). Using gt_plv.trueFB == 1 silently creates an all-zero vector
-%     (MATLAB returns [] or zeros for missing struct fields accessed this way
-%     on a table), filtering out ALL rows.
-%     FIX: ~gt_plv.false_fb
+% Key settings at the top of the script:
+%   PLOT_SCALE  — 'z' | 'norm' | 'raw'  (controls figure y-axes only)
 %
-%  BUG 2 — next_correct computation ignores block boundaries (RQ4)
-%     The original code assigns next_correct by taking consecutive rows
-%     within a subject across the whole table, so the last trial of block 1
-%     gets next_correct = first trial of block 2. That is a different block
-%     with a different stimulus set and reversal — the "next trial correct"
-%     has no meaningful continuity there.
-%     FIX: nest the loop inside a per-block inner loop.
-%
-%  BUG 3 — categorical comparison in plot_stage_bar
-%     categorical({bts{bt_i}}) creates a 1×1 categorical cell array, not a
-%     scalar categorical. The == comparison against a column categorical may
-%     silently fail or produce incorrect logical indexing.
-%     FIX: compare directly as string: gt_sub.block_type == bts{bt_i}
-%
-%  BUG 4 — plot_lme_effects called with yvar='correct' (numeric 0/1)
-%     The function calls categories(gt.(yvar)) which works only on categorical
-%     arrays. If correct is still numeric, this errors. If already converted
-%     to categorical it labels groups '0'/'1' which are opaque in figures.
-%     FIX: convert correct to categorical with explicit labels inside the
-%     function; use 'Incorrect'/'Correct' as display names.
-%
-%  BUG 5 — prefrontal_neg_peak_norm used in models but NOT in z-score list
-%     The z-score loop processes FCz_neg_peak_amp (raw µV) but the models
-%     use FCz_neg_peak_norm (baseline-RMS-normalised). That column is on a
-%     completely different scale from the z-scored columns used in the same
-%     models. Both should either be z-scored or neither.
-%     FIX: add FCz_neg_peak_norm to the z-score list and use the _z version
-%     in all models for consistency. The baseline-RMS normalised value is
-%     already interpretable as "signal / noise" but it still has
-%     between-subject variance in scale.
-%
-%  BUG 6 — plot_lme_effects uses ttest2 (independent samples) to annotate
-%     p-values comparing two groups within an x-level. Because the same
-%     subject appears in both D and P block columns, the correct test is
-%     ttest (paired), not ttest2.
-%     FIX: match subjects and use ttest on paired differences.
-%
-%  BUG 7 — mdl_false_fn uses false_fb (logical) as a continuous predictor
-%     in fitlme. MATLAB's fitlme will treat logicals as doubles (0/1), which
-%     is correct numerically, but the interaction conf_z * false_fb will test
-%     whether the slope of confidence on FRN differs between true and false
-%     trials. This is actually the intended test but false_fb should be cast
-%     to categorical so coefficients are labelled clearly.
-%     FIX: cast to categorical before model call.
-%
-%  BUG 8 — PLV_z assignment in plv_long may misalign rows
-%     plv_long = [gt_plv; gt_fs] stacks the rows. When gt_plv and gt_fs
-%     differ in height (different subjects passed the MIN_TRIALS_PLV filter
-%     for fp vs fs), the assignment plv_long.PLV_z = [gt_plv.PLV_fp_z;
-%     gt_fs.PLV_fs_z] will error or silently mismatch if any rows with
-%     NaN PLV were dropped differently between the two tables.
-%     FIX: keep all rows and fill PLV_z conditionally after stacking.
-%
-%  BUG 9 — randon effects formula `(1 + stage | subj_id)` with ordinal stage
-%     stage is set as ordinal categorical with 4 levels. A random slope over
-%     an ordinal predictor requires MATLAB to dummy-code it (3 contrasts).
-%     A random slope for 3 dummy variables with a small n (~30 subjects)
-%     will not converge. This will produce a singular fit warning and
-%     unreliable variance estimates.
-%     FIX: Use (1 | subj_id) + (1 | subj_id:stage) crossed random effects,
-%     which is equivalent but more stable; or drop the random slope for stage.
+% BUGS FIXED vs original (9 fixes — see inline comments):
+%   1. gt_plv.trueFB == 1 → ~gt_plv.false_fb
+%   2. next_correct crossed block boundaries → nested per-block loop
+%   3. categorical() comparison in plot_stage_bar → string comparison
+%   4. plot_lme_effects with numeric correct → categorical with labels
+%   5. prefrontal_mean_norm not in z-score list → added + used _z version
+%   6. ttest2 (independent) → ttest (paired) in plot_lme_effects
+%   7. false_fb as continuous predictor → cast to categorical first
+%   8. PLV_z row misalignment after stacking → conditional fill after stack
+%   9. (1+stage|subj_id) random slope → (1|subj_id)+(1|subj_id:stage)
 %
 % =============================================================================
 
@@ -97,6 +44,27 @@ else
 end
 saved_tables_folder    = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Outcome_feature_tables_v4_merged');
 figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Figures', 'RQ_analysis_combined_extended_electrodes');
+
+% -------------------------------------------------------------------------
+%% PLOTTING SCALE CONFIGURATION
+% -------------------------------------------------------------------------
+% This switch changes FIGURE variables only. The inferential models below
+% still use within-subject z-scored predictors/outcomes unless you explicitly
+% edit the model formulae.
+%
+%   'z'    = within-subject z-scored values. Good for combining subjects and
+%            comparing effect directions, but less directly interpretable.
+%   'norm' = baseline-RMS-normalised values where available, e.g.
+%            prefrontal_mean_norm, P300_norm. Better for physiology plots.
+%   'raw'  = raw amplitude / raw feature values where available, e.g.
+%            prefrontal_mean_amp, P300_amp. Most interpretable units,
+%            but most sensitive to between-subject scale differences.
+%
+% Recommendation: use PLOT_SCALE='norm' for main EEG amplitude figures and
+% PLOT_SCALE='z' for compact model-aligned supplementary figures.
+PLOT_SCALE = 'norm';      % options: 'z', 'norm', 'raw'
+
+figure_output_folder = fullfile(figure_output_folder, ['S7d_no_lines_plot_' PLOT_SCALE]);
 if ~exist(figure_output_folder, 'dir'), mkdir(figure_output_folder); end
 
 % Load the combined KH+RR feature table (from S4) unless already in workspace.
@@ -128,7 +96,7 @@ group_table.stimulus_modality = categorical(group_table.stimulus_modality);
 group_table.practice_task     = categorical(group_table.practice_task);
 
 % ─── FIX 5: extend z-score list to include FCz_neg_peak_norm ────────────────
-features_to_zscore = {'prefrontal_neg_peak_amp','prefrontal_neg_peak_norm', ...
+features_to_zscore = {'prefrontal_mean_amp','prefrontal_mean_norm', ...
                       'FRN_amp','prefrontalFRN_norm','RewP_amp','RewP_norm', ...
                       'P300_amp','P300_norm','Theta_amp', ...
                       'PLV_fp','PLV_fs','PLV_fp_pairwise','PLV_fs_pairwise'};
@@ -152,6 +120,30 @@ end
 
 gt = group_table;   % working copy
 
+% Resolve plot variables from PLOT_SCALE. These names are used only for
+% figures. Model formulae continue to use *_z variables below.
+[FN_PLOT,    FN_YLBL,    FN_REVERSE_Y]    = resolve_plot_feature(gt, 'prefrontal_mean', PLOT_SCALE);
+[P300_PLOT,  P300_YLBL,  P300_REVERSE_Y]  = resolve_plot_feature(gt, 'P300', PLOT_SCALE);
+[THETA_PLOT, THETA_YLBL, THETA_REVERSE_Y] = resolve_plot_feature(gt, 'Theta', PLOT_SCALE);
+[PLVFP_PLOT, PLVFP_YLBL, PLVFP_REVERSE_Y] = resolve_plot_feature(gt, 'PLV_fp', PLOT_SCALE);
+[PLVFS_PLOT, PLVFS_YLBL, PLVFS_REVERSE_Y] = resolve_plot_feature(gt, 'PLV_fs', PLOT_SCALE);
+
+fprintf('\nPlot scale: %s\n', PLOT_SCALE);
+fprintf('  FN plot variable     : %s\n', FN_PLOT);
+fprintf('  P300 plot variable   : %s\n', P300_PLOT);
+fprintf('  Theta plot variable  : %s\n', THETA_PLOT);
+fprintf('  FP PLV plot variable : %s\n', PLVFP_PLOT);
+fprintf('  FS PLV plot variable : %s\n', PLVFS_PLOT);
+
+% Derive block-transition and prior-uncertainty history columns for the
+% additional exploratory EEG figures below. These are plotting columns only.
+gt = add_transition_history_columns(gt);
+
+fprintf('\nTransition / prior-P plotting columns added.\n');
+if ismember('transition_recent', gt.Properties.VariableNames)
+    disp(tabulate(categorical(gt.transition_recent)));
+end
+
 fprintf('\n\n=== STATISTICAL MODELS ===\n\n');
 
 % =========================================================================
@@ -160,12 +152,12 @@ fprintf('\n\n=== STATISTICAL MODELS ===\n\n');
 fprintf('--- RQ1: Feedback negativity and P300 under uncertainty ---\n');
 
 gt_true = gt(~gt.false_fb & ...
-              ~isnan(gt.prefrontal_neg_peak_norm_z) & ...    % FIX 5: use _z version
+              ~isnan(gt.prefrontal_mean_norm_z) & ...    % FIX 5: use _z version
               ~isnan(gt.P300_amp_z), :);
 
 % FIX 9: stable random effects — per-subject intercept only for stage
 mdl_fn_rq1 = fitlme(gt_true, ...
-    ['prefrontal_neg_peak_norm_z ~ block_type * correct + stage + ' ...
+    ['prefrontal_mean_norm_z ~ block_type * correct + stage + ' ...
      '(1 + block_type | subj_id)'], ...
     'FitMethod','REML');
 fprintf('  FN model:\n'); disp(mdl_fn_rq1.Coefficients);
@@ -177,36 +169,36 @@ mdl_p3_rq1 = fitlme(gt_true, ...
 fprintf('  P300 model:\n'); disp(mdl_p3_rq1.Coefficients);
 
 % FIX 4: pass correct as a character label so plot_lme_effects can handle it
-plot_lme_effects(gt_true, 'prefrontal_neg_peak_norm_z', 'block_type', 'correct', ...
+plot_lme_effects(gt_true, FN_PLOT, 'block_type', 'correct', ...
     {'Incorrect','Correct'}, ...
-    'RQ1: FN × Block type × Outcome', figure_output_folder, 'RQ1_FN');
-plot_lme_effects(gt_true, 'P300_norm_z', 'block_type', 'correct', ...
+    'RQ1: FN × Block type × Outcome', figure_output_folder, 'RQ1_FN', FN_YLBL, FN_REVERSE_Y);
+plot_lme_effects(gt_true, P300_PLOT, 'block_type', 'correct', ...
     {'Incorrect','Correct'}, ...
-    'RQ1: P300 × Block type × Outcome', figure_output_folder, 'RQ1_P300');
+    'RQ1: P300 × Block type × Outcome', figure_output_folder, 'RQ1_P300', P300_YLBL, P300_REVERSE_Y);
 
 % -------------------------------------------------------------------------
 %% NEW PLOTS: prefrontal negative peak and P300
 % -------------------------------------------------------------------------
 
-plot_stage_outcome_lines(gt, 'prefrontal_neg_peak_norm_z', ...
-    'prefrontal negative peak (z)', ...
+plot_stage_outcome_lines(gt, FN_PLOT, ...
+    FN_YLBL, ...
     'RQ: prefrontal negative peak across stages — correct vs incorrect', ...
-    figure_output_folder, 'prefrontal_negpeak_stage_correct_incorrect');
+    figure_output_folder, 'prefrontal_negpeak_stage_correct_incorrect', FN_REVERSE_Y);
 
-plot_stage_transition_feedback(gt, 'prefrontal_neg_peak_norm_z', ...
-    'prefrontal negative peak (z)', ...
+plot_stage_transition_feedback(gt, FN_PLOT, ...
+    FN_YLBL, ...
     'RQ: prefrontal negative peak across stages — D/P and true/false feedback', ...
-    figure_output_folder, 'prefrontal_negpeak_stage_block_feedback');
+    figure_output_folder, 'prefrontal_negpeak_stage_block_feedback', FN_REVERSE_Y);
 
-plot_stage_outcome_lines(gt, 'P300_norm_z', ...
-    'P300 (z)', ...
+plot_stage_outcome_lines(gt, P300_PLOT, ...
+    P300_YLBL, ...
     'RQ: P300 across stages — correct vs incorrect', ...
-    figure_output_folder, 'P300_stage_correct_incorrect');
+    figure_output_folder, 'P300_stage_correct_incorrect', P300_REVERSE_Y);
 
-plot_stage_transition_feedback(gt, 'P300_norm_z', ...
-    'P300 (z)', ...
+plot_stage_transition_feedback(gt, P300_PLOT, ...
+    P300_YLBL, ...
     'RQ: P300 across stages — D/P and true/false feedback', ...
-    figure_output_folder, 'P300_stage_block_feedback');
+    figure_output_folder, 'P300_stage_block_feedback', P300_REVERSE_Y);
 
 % =========================================================================
 %% RQ2: Does confidence predict FRN? Stronger in D than P?
@@ -214,7 +206,7 @@ plot_stage_transition_feedback(gt, 'P300_norm_z', ...
 fprintf('\n--- RQ2: Confidence × Feedback negativity × block_type ---\n');
 
 gt_inc = gt(...%gt.correct==0 & ~gt.false_fb & ...
-             ~isnan(gt.confidence) & ~isnan(gt.prefrontal_neg_peak_norm_z), :);
+             ~isnan(gt.confidence) & ~isnan(gt.prefrontal_mean_norm_z), :);
 
 % Z-score confidence within subject
 gt_inc.conf_z = nan(height(gt_inc), 1);
@@ -227,7 +219,7 @@ for si = 1:numel(subj_list)
 end
 
 mdl_fn_conf = fitlme(gt_inc, ...
-    ['prefrontal_neg_peak_norm_z ~ conf_z * block_type + stage + ' ...
+    ['prefrontal_mean_norm_z ~ conf_z * block_type + stage + ' ...
      '(1 + conf_z | subj_id)'], ...
     'FitMethod','REML');
 fprintf('  FRN ~ confidence × block_type (incorrect trials only):\n');
@@ -235,7 +227,7 @@ disp(mdl_fn_conf.Coefficients);
 
 % False feedback analysis (P blocks: does perceived vs true feedback matter?)
 gt_p = gt(gt.block_type=='P' & ...
-           ~isnan(gt.prefrontal_neg_peak_norm_z) & ~isnan(gt.confidence), :);
+           ~isnan(gt.prefrontal_mean_norm_z) & ~isnan(gt.confidence), :);
 gt_p.conf_z    = nan(height(gt_p), 1);
 gt_p.false_fb_cat = categorical(double(gt_p.false_fb), [0 1], {'TrueFB','FalseFB'}); % FIX 7
 
@@ -249,7 +241,7 @@ end
 
 if height(gt_p) > 10
     mdl_false_fn = fitlme(gt_p, ...
-        ['prefrontal_neg_peak_norm_z ~ conf_z * false_fb + stage + ' ...
+        ['prefrontal_mean_norm_z ~ conf_z * false_fb + stage + ' ...
          '(1 | subj_id)'], ...
         'FitMethod','REML');
     fprintf('  FRN ~ confidence × false_fb (P blocks only):\n');
@@ -259,7 +251,11 @@ else
     warning('Too few P-block rows for false_fb model.');
 end
 
-plot_confidence_fRN(gt_inc, figure_output_folder);
+% Expanded RQ2 visualisation suite: confidence, false feedback, RW value, RW PE.
+% Models use prefrontal_mean_norm_z for significance annotations; plots use
+% the selected FN_PLOT variable so PLOT_SCALE remains respected.
+plot_confidence_fRN_extended(gt, gt_inc, gt_p, figure_output_folder, ...
+    FN_PLOT, FN_YLBL, FN_REVERSE_Y);
 
 
 % =========================================================================
@@ -276,8 +272,8 @@ mdl_theta = fitlme(gt_th, ...
     'FitMethod','REML');
 fprintf('  Theta model:\n'); disp(mdl_theta.Coefficients);
 
-plot_stage_bar(gt_th, 'Theta_amp_z', 'Theta amplitude (z, incorrect trials)', ...
-    'RQ3: Stage × Block type — Frontal theta', figure_output_folder, 'RQ3_Theta');
+plot_stage_bar(gt_th, THETA_PLOT, [THETA_YLBL ' (incorrect trials)'], ...
+    'RQ3: Stage × Block type — Frontal theta', figure_output_folder, 'RQ3_Theta', THETA_REVERSE_Y);
 
 
 % =========================================================================
@@ -322,8 +318,8 @@ mdl_plv_predict = fitglme(gt_plv_next2, ...
 fprintf('  PLV → next trial correct (logistic):\n');
 disp(mdl_plv_predict.Coefficients);
 
-plot_stage_bar(gt_plv, 'PLV_fp_z', 'Fronto-parietal PLV (z)', ...
-    'RQ4: Stage × Block type — FP PLV', figure_output_folder, 'RQ4_PLV_fp');
+plot_stage_bar(gt_plv, PLVFP_PLOT, PLVFP_YLBL, ...
+    'RQ4: Stage × Block type — FP PLV', figure_output_folder, 'RQ4_PLV_fp', PLVFP_REVERSE_Y);
 
 
 % =========================================================================
@@ -348,7 +344,55 @@ mdl_pathway = fitlme(plv_long, ...
 fprintf('  Pathway × stage × block_type:\n');
 disp(mdl_pathway.Coefficients);
 
-plot_pathway_comparison(gt_fp, gt_fs, figure_output_folder);
+plot_pathway_comparison(gt_fp, gt_fs, figure_output_folder, PLVFP_PLOT, PLVFS_PLOT, PLVFP_YLBL, PLVFS_YLBL, PLVFP_REVERSE_Y || PLVFS_REVERSE_Y);
+
+% =========================================================================
+%% RQ6 / S7d: No-line transition and cumulative prior-P plots for all EEG components
+% =========================================================================
+fprintf('\n--- RQ6: EEG components by recent transition and prior P exposure ---\n');
+
+component_specs = { ...
+    FN_PLOT,    FN_YLBL,    FN_REVERSE_Y,    'outcome',   'Prefrontal negative peak'; ...
+    P300_PLOT,  P300_YLBL,  P300_REVERSE_Y,  'outcome',   'P300'; ...
+    THETA_PLOT, THETA_YLBL, THETA_REVERSE_Y, 'incorrect', 'Frontal theta'; ...
+    PLVFP_PLOT, PLVFP_YLBL, PLVFP_REVERSE_Y, 'all',       'Fronto-parietal PLV'; ...
+    PLVFS_PLOT, PLVFS_YLBL, PLVFS_REVERSE_Y, 'all',       'Fronto-somatosensory PLV'};
+
+for ci = 1:size(component_specs,1)
+    feat_i = component_specs{ci,1};
+    ylbl_i = component_specs{ci,2};
+    rev_i  = component_specs{ci,3};
+    mode_i = component_specs{ci,4};
+    name_i = component_specs{ci,5};
+
+    if ~ismember(feat_i, gt.Properties.VariableNames)
+        warning('Skipping RQ6 plots for %s: missing feature %s.', name_i, feat_i);
+        continue;
+    end
+
+    safe_name = matlab.lang.makeValidName(name_i);
+
+    % S7d avoids line graphs for categorical predictors. For each component,
+    % it saves two alternatives for recent-transition effects and two
+    % alternatives for prior-P exposure effects:
+    %   A = dot + 95% CI with subject means overlaid
+    %   B = heatmap of subject-level means
+    plot_component_transition_dotci_s7d(gt, feat_i, ylbl_i, ...
+        sprintf('Recent block transition: %s', name_i), ...
+        figure_output_folder, ['S7d_A_transition_dotCI_' safe_name], rev_i, mode_i);
+
+    plot_component_transition_heatmap_s7d(gt, feat_i, ylbl_i, ...
+        sprintf('Recent block transition heatmap: %s', name_i), ...
+        figure_output_folder, ['S7d_B_transition_heatmap_' safe_name], rev_i, mode_i);
+
+    plot_component_priorP_dotci_s7d(gt, feat_i, ylbl_i, ...
+        sprintf('Prior probabilistic exposure: %s', name_i), ...
+        figure_output_folder, ['S7d_A_nPrevP_dotCI_' safe_name], rev_i, mode_i);
+
+    plot_component_priorP_heatmap_s7d(gt, feat_i, ylbl_i, ...
+        sprintf('Prior probabilistic exposure heatmap: %s', name_i), ...
+        figure_output_folder, ['S7d_B_nPrevP_heatmap_' safe_name], rev_i, mode_i);
+end
 
 fprintf('\n\nAll RQ analyses complete.\n');
 
@@ -883,17 +927,854 @@ end
 end
 
 
+
+
+% =========================================================================
+%% TRANSITION AND PRIOR-P PLOTTING HELPERS
+% =========================================================================
+function T = add_transition_history_columns(T)
+%ADD_TRANSITION_HISTORY_COLUMNS  Add transition_recent and n_prev_P columns.
+% transition_recent is the previous block type -> current block type label:
+% D->D, D->P, P->D, P->P. First blocks are labelled first.
+% n_prev_P is the number of previous P blocks within the subject.
+
+if ~ismember('subj_id', T.Properties.VariableNames)
+    error('add_transition_history_columns: T must contain subj_id.');
+end
+if ~ismember('block_number', T.Properties.VariableNames)
+    if ismember('block', T.Properties.VariableNames)
+        T.block_number = kh_to_numeric(T.block);
+    elseif ismember('blocknum', T.Properties.VariableNames)
+        T.block_number = kh_to_numeric(T.blocknum);
+    else
+        error('add_transition_history_columns: no block_number/block/blocknum column found.');
+    end
+end
+
+T.subj_id_s = string(T.subj_id);
+bt = string(T.block_type);
+bt(bt=="V") = "P";
+T.block_type_s = bt;
+T.transition_recent = repmat("first", height(T), 1);
+T.n_prev_P = nan(height(T), 1);
+T.n_prev_P_bin = repmat("missing", height(T), 1);
+
+subs = unique(T.subj_id_s);
+for si = 1:numel(subs)
+    sm = T.subj_id_s == subs(si);
+    blks = unique(T.block_number(sm & ~isnan(T.block_number)));
+    blks = sort(blks(:)');
+    prev_types = strings(0,1);
+
+    for bi = 1:numel(blks)
+        b = blks(bi);
+        bm = sm & T.block_number == b;
+        if ~any(bm), continue; end
+
+        curr_vals = T.block_type_s(bm);
+        curr_vals = curr_vals(curr_vals=="D" | curr_vals=="P");
+        if isempty(curr_vals)
+            curr = "";
+        else
+            curr = curr_vals(find(curr_vals~="",1,'first'));
+        end
+
+        n_prev = sum(prev_types == "P");
+        T.n_prev_P(bm) = n_prev;
+        if n_prev >= 2
+            T.n_prev_P_bin(bm) = "2+";
+        else
+            T.n_prev_P_bin(bm) = string(n_prev);
+        end
+
+        if bi == 1 || isempty(prev_types)
+            T.transition_recent(bm) = "first";
+        else
+            prev = prev_types(end);
+            if (prev=="D" || prev=="P") && (curr=="D" || curr=="P")
+                T.transition_recent(bm) = prev + "->" + curr;
+            else
+                T.transition_recent(bm) = "unknown";
+            end
+        end
+
+        if curr=="D" || curr=="P"
+            prev_types(end+1,1) = curr; %#ok<AGROW>
+        end
+    end
+end
+end
+
+function plot_component_transition_dotci_s7d(gt, feat, ylbl, ttl, outdir, fname, reverse_y, mode)
+% Dot + 95% CI plot for recent-transition effects.
+% No lines are used. Each displayed point is the mean of subject-level means.
+if nargin < 8 || isempty(mode), mode = 'all'; end
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
+
+stages = {'LN','LE','RN','RE'};
+transitions = {'D->D','D->P','P->D','P->P'};
+stage_cols = [0.12 0.62 0.47; 0.85 0.65 0.00; 0.80 0.27 0.13; 0.40 0.25 0.65];
+stage_offsets = [-0.24 -0.08 0.08 0.24];
+
+switch char(mode)
+    case 'outcome'
+        panel_defs = {outcome_mask_local(gt,0), 'Incorrect true-feedback trials'; ...
+                      outcome_mask_local(gt,1), 'Correct true-feedback trials'};
+    case 'incorrect'
+        panel_defs = {outcome_mask_local(gt,0), 'Incorrect true-feedback trials'};
+    otherwise
+        panel_defs = {true(height(gt),1), 'All true-feedback trials'};
+end
+
+fig = figure('Position',[50 50 680*size(panel_defs,1) 560]);
+sgtitle({ttl; 'Alternative A: dot + 95% CI; no categorical line interpolation'}, 'Interpreter','none');
+
+for pi = 1:size(panel_defs,1)
+    ax = subplot(1,size(panel_defs,1),pi); hold(ax,'on');
+    title(ax, panel_defs{pi,2}, 'FontSize',10);
+    base_mask = panel_defs{pi,1} & true_feedback_mask_local(gt) & ~is_first_transition_local(gt);
+    [sig_line, ~] = lme_sigline_for_panel_local(gt, feat, base_mask, 'transition', outdir, fname, panel_defs{pi,2});
+    add_lme_sig_text_local(ax, sig_line);
+
+    for si = 1:numel(stages)
+        for ti = 1:numel(transitions)
+            m = base_mask & string(gt.transition_recent)==transitions{ti} & ...
+                string(gt.stage)==stages{si} & ~isnan(gt.(feat));
+            vals = subject_means_local(gt, feat, m);
+            [mn, se, n] = mean_sem_n_local(vals);
+            if isnan(mn), continue; end
+            ci = 1.96 * se;
+            x = ti + stage_offsets(si);
+            errorbar(ax, x, mn, ci, 'o', 'LineStyle','none', ...
+                'Color',stage_cols(si,:), 'MarkerFaceColor',stage_cols(si,:), ...
+                'MarkerEdgeColor','k', 'MarkerSize',7, 'LineWidth',1.25, ...
+                'CapSize',5, 'HandleVisibility','off');
+            jitter = (rand(size(vals))-0.5) * 0.05;
+            scatter(ax, x+jitter, vals, 12, stage_cols(si,:), 'filled', ...
+                'MarkerFaceAlpha',0.20, 'MarkerEdgeAlpha',0.0, 'HandleVisibility','off');
+            text(ax, x, mn, sprintf(' n=%d', n), 'FontSize',6, ...
+                'VerticalAlignment','bottom', 'HorizontalAlignment','left', ...
+                'Color',stage_cols(si,:), 'Clipping','off');
+        end
+        plot(ax, NaN, NaN, 'o', 'Color',stage_cols(si,:), ...
+            'MarkerFaceColor',stage_cols(si,:), 'MarkerEdgeColor','k', ...
+            'DisplayName',stages{si});
+    end
+
+    set(ax,'XTick',1:numel(transitions),'XTickLabel',transitions, 'TickDir','out');
+    xlabel(ax,'Recent transition'); ylabel(ax,ylbl,'Interpreter','none');
+    if reverse_y, set(ax,'YDir','reverse'); end
+    legend(ax,'Box','off','Location','best');
+    axis(ax,'square');
+end
+
+save_fig_both_s7d(fig, outdir, fname);
+end
+
+function plot_component_transition_heatmap_s7d(gt, feat, ylbl, ttl, outdir, fname, reverse_y, mode)
+% Heatmap alternative for recent-transition effects.
+% Rows are stages, columns are transitions. Values are means of subject-level means.
+if nargin < 8 || isempty(mode), mode = 'all'; end
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
+
+stages = {'LN','LE','RN','RE'};
+transitions = {'D->D','D->P','P->D','P->P'};
+
+switch char(mode)
+    case 'outcome'
+        panel_defs = {outcome_mask_local(gt,0), 'Incorrect true-feedback'; ...
+                      outcome_mask_local(gt,1), 'Correct true-feedback'};
+    case 'incorrect'
+        panel_defs = {outcome_mask_local(gt,0), 'Incorrect true-feedback'};
+    otherwise
+        panel_defs = {true(height(gt),1), 'All true-feedback'};
+end
+
+fig = figure('Position',[50 50 620*size(panel_defs,1) 560]);
+sgtitle({ttl; 'Alternative B: heatmap of subject-level means'}, 'Interpreter','none');
+
+all_mats = cell(size(panel_defs,1),1);
+all_vals = [];
+all_ns = cell(size(panel_defs,1),1);
+sig_lines = cell(size(panel_defs,1),1);
+for pi = 1:size(panel_defs,1)
+    mat = nan(numel(stages), numel(transitions));
+    nmat = nan(numel(stages), numel(transitions));
+    base_mask = panel_defs{pi,1} & true_feedback_mask_local(gt) & ~is_first_transition_local(gt);
+    [sig_lines{pi}, ~] = lme_sigline_for_panel_local(gt, feat, base_mask, 'transition', outdir, fname, panel_defs{pi,2});
+    for si = 1:numel(stages)
+        for ti = 1:numel(transitions)
+            m = base_mask & string(gt.transition_recent)==transitions{ti} & ...
+                string(gt.stage)==stages{si} & ~isnan(gt.(feat));
+            vals = subject_means_local(gt, feat, m);
+            [mn, ~, n] = mean_sem_n_local(vals);
+            mat(si,ti) = mn;
+            nmat(si,ti) = n;
+        end
+    end
+    all_mats{pi} = mat;
+    all_ns{pi} = nmat;
+    all_vals = [all_vals; mat(:)]; %#ok<AGROW>
+end
+cl = symmetric_or_data_limits_s7d(all_vals, reverse_y);
+
+for pi = 1:size(panel_defs,1)
+    ax = subplot(1,size(panel_defs,1),pi);
+    imagesc(ax, all_mats{pi});
+    colormap(ax, parula);
+    if all(isfinite(cl)), clim(ax, cl); end
+    cb = colorbar(ax); cb.Label.String = ylbl; cb.Label.Interpreter = 'none';
+    title(ax, panel_defs{pi,2}, 'FontSize',10);
+    add_lme_sig_text_local(ax, sig_lines{pi});
+    set(ax,'XTick',1:numel(transitions),'XTickLabel',transitions, ...
+        'YTick',1:numel(stages),'YTickLabel',stages, 'TickDir','out');
+    xlabel(ax,'Recent transition'); ylabel(ax,'Stage');
+    axis(ax,'square');
+    mat = all_mats{pi}; nmat = all_ns{pi};
+    for si = 1:numel(stages)
+        for ti = 1:numel(transitions)
+            if ~isnan(mat(si,ti))
+                text(ax, ti, si, sprintf('%.2f\nn=%d', mat(si,ti), nmat(si,ti)), ...
+                    'HorizontalAlignment','center', 'FontSize',7, 'Color','w', 'FontWeight','bold');
+            end
+        end
+    end
+end
+
+save_fig_both_s7d(fig, outdir, fname);
+end
+
+function plot_component_priorP_dotci_s7d(gt, feat, ylbl, ttl, outdir, fname, reverse_y, mode)
+% Dot + 95% CI plot for prior-P exposure effects.
+% X is n_prev_P bin. Columns split current block type. Rows split outcome when relevant.
+if nargin < 8 || isempty(mode), mode = 'all'; end
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
+
+stages = {'LN','LE','RN','RE'};
+stage_cols = [0.12 0.62 0.47; 0.85 0.65 0.00; 0.80 0.27 0.13; 0.40 0.25 0.65];
+stage_offsets = [-0.20 -0.07 0.07 0.20];
+npp_bins = {'0','1','2+'};
+btypes = {'D','P'};
+
+switch char(mode)
+    case 'outcome'
+        row_defs = {outcome_mask_local(gt,0), 'Incorrect'; ...
+                    outcome_mask_local(gt,1), 'Correct'};
+    case 'incorrect'
+        row_defs = {outcome_mask_local(gt,0), 'Incorrect'};
+    otherwise
+        row_defs = {true(height(gt),1), 'All outcomes'};
+end
+
+fig = figure('Position',[50 50 1050 440*size(row_defs,1)]);
+sgtitle({ttl; 'Alternative A: dot + 95% CI by prior-P exposure; no lines'}, 'Interpreter','none');
+
+for ri = 1:size(row_defs,1)
+    for bi = 1:numel(btypes)
+        ax = subplot(size(row_defs,1), numel(btypes), (ri-1)*numel(btypes)+bi); hold(ax,'on');
+        title(ax, sprintf('%s | current %s block', row_defs{ri,2}, btypes{bi}), 'FontSize',10);
+        base_mask = row_defs{ri,1} & true_feedback_mask_local(gt) & string(gt.block_type_s)==btypes{bi};
+        panel_tag = sprintf('%s_current_%s', row_defs{ri,2}, btypes{bi});
+        [sig_line, ~] = lme_sigline_for_panel_local(gt, feat, base_mask, 'priorP', outdir, fname, panel_tag);
+        add_lme_sig_text_local(ax, sig_line);
+
+        for si = 1:numel(stages)
+            for ni = 1:numel(npp_bins)
+                m = base_mask & string(gt.stage)==stages{si} & ...
+                    string(gt.n_prev_P_bin)==npp_bins{ni} & ~isnan(gt.(feat));
+                vals = subject_means_local(gt, feat, m);
+                [mn, se, n] = mean_sem_n_local(vals);
+                if isnan(mn), continue; end
+                ci = 1.96 * se;
+                x = ni + stage_offsets(si);
+                errorbar(ax, x, mn, ci, 'o', 'LineStyle','none', ...
+                    'Color',stage_cols(si,:), 'MarkerFaceColor',stage_cols(si,:), ...
+                    'MarkerEdgeColor','k', 'MarkerSize',7, 'LineWidth',1.25, ...
+                    'CapSize',5, 'HandleVisibility','off');
+                jitter = (rand(size(vals))-0.5) * 0.04;
+                scatter(ax, x+jitter, vals, 11, stage_cols(si,:), 'filled', ...
+                    'MarkerFaceAlpha',0.18, 'MarkerEdgeAlpha',0.0, 'HandleVisibility','off');
+                text(ax, x, mn, sprintf(' n=%d', n), 'FontSize',6, ...
+                    'VerticalAlignment','bottom', 'HorizontalAlignment','left', ...
+                    'Color',stage_cols(si,:), 'Clipping','off');
+            end
+            plot(ax, NaN, NaN, 'o', 'Color',stage_cols(si,:), ...
+                'MarkerFaceColor',stage_cols(si,:), 'MarkerEdgeColor','k', ...
+                'DisplayName',stages{si});
+        end
+
+        set(ax,'XTick',1:numel(npp_bins),'XTickLabel',{'0','1','2+'}, 'TickDir','out');
+        xlabel(ax,'Number of prior P blocks'); ylabel(ax,ylbl,'Interpreter','none');
+        if reverse_y, set(ax,'YDir','reverse'); end
+        legend(ax,'Box','off','Location','best');
+        axis(ax,'square');
+    end
+end
+
+save_fig_both_s7d(fig, outdir, fname);
+end
+
+function plot_component_priorP_heatmap_s7d(gt, feat, ylbl, ttl, outdir, fname, reverse_y, mode)
+% Heatmap alternative for prior-P effects.
+% Rows are stages, columns are n_prev_P bins. Current block type and outcome are faceted.
+if nargin < 8 || isempty(mode), mode = 'all'; end
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
+
+stages = {'LN','LE','RN','RE'};
+npp_bins = {'0','1','2+'};
+btypes = {'D','P'};
+
+switch char(mode)
+    case 'outcome'
+        row_defs = {outcome_mask_local(gt,0), 'Incorrect'; ...
+                    outcome_mask_local(gt,1), 'Correct'};
+    case 'incorrect'
+        row_defs = {outcome_mask_local(gt,0), 'Incorrect'};
+    otherwise
+        row_defs = {true(height(gt),1), 'All outcomes'};
+end
+
+fig = figure('Position',[50 50 1050 440*size(row_defs,1)]);
+sgtitle({ttl; 'Alternative B: heatmap of subject-level means'}, 'Interpreter','none');
+
+mats = cell(size(row_defs,1), numel(btypes));
+nmats = cell(size(row_defs,1), numel(btypes));
+sig_lines = cell(size(row_defs,1), numel(btypes));
+all_vals = [];
+for ri = 1:size(row_defs,1)
+    for bi = 1:numel(btypes)
+        mat = nan(numel(stages), numel(npp_bins));
+        nmat = nan(numel(stages), numel(npp_bins));
+        base_mask = row_defs{ri,1} & true_feedback_mask_local(gt) & string(gt.block_type_s)==btypes{bi};
+        panel_tag = sprintf('%s_current_%s', row_defs{ri,2}, btypes{bi});
+        [sig_lines{ri,bi}, ~] = lme_sigline_for_panel_local(gt, feat, base_mask, 'priorP', outdir, fname, panel_tag);
+        for si = 1:numel(stages)
+            for ni = 1:numel(npp_bins)
+                m = base_mask & string(gt.stage)==stages{si} & ...
+                    string(gt.n_prev_P_bin)==npp_bins{ni} & ~isnan(gt.(feat));
+                vals = subject_means_local(gt, feat, m);
+                [mn, ~, n] = mean_sem_n_local(vals);
+                mat(si,ni) = mn;
+                nmat(si,ni) = n;
+            end
+        end
+        mats{ri,bi} = mat;
+        nmats{ri,bi} = nmat;
+        all_vals = [all_vals; mat(:)]; %#ok<AGROW>
+    end
+end
+cl = symmetric_or_data_limits_s7d(all_vals, reverse_y);
+
+for ri = 1:size(row_defs,1)
+    for bi = 1:numel(btypes)
+        ax = subplot(size(row_defs,1), numel(btypes), (ri-1)*numel(btypes)+bi);
+        imagesc(ax, mats{ri,bi});
+        colormap(ax, parula);
+        if all(isfinite(cl)), clim(ax, cl); end
+        cb = colorbar(ax); cb.Label.String = ylbl; cb.Label.Interpreter = 'none';
+        title(ax, sprintf('%s | current %s block', row_defs{ri,2}, btypes{bi}), 'FontSize',10);
+        add_lme_sig_text_local(ax, sig_lines{ri,bi});
+        set(ax,'XTick',1:numel(npp_bins),'XTickLabel',{'0','1','2+'}, ...
+            'YTick',1:numel(stages),'YTickLabel',stages, 'TickDir','out');
+        xlabel(ax,'Number of prior P blocks'); ylabel(ax,'Stage');
+        axis(ax,'square');
+        mat = mats{ri,bi}; nmat = nmats{ri,bi};
+        for si = 1:numel(stages)
+            for ni = 1:numel(npp_bins)
+                if ~isnan(mat(si,ni))
+                    text(ax, ni, si, sprintf('%.2f\nn=%d', mat(si,ni), nmat(si,ni)), ...
+                        'HorizontalAlignment','center', 'FontSize',7, 'Color','w', 'FontWeight','bold');
+                end
+            end
+        end
+    end
+end
+
+save_fig_both_s7d(fig, outdir, fname);
+end
+
+function save_fig_both_s7d(fig, outdir, fname)
+% Save vector PDF and PNG without relying on project helper availability.
+if ~exist(outdir,'dir'), mkdir(outdir); end
+try
+    exportgraphics(fig, fullfile(outdir,[fname '.pdf']), 'ContentType','vector');
+    exportgraphics(fig, fullfile(outdir,[fname '.png']), 'Resolution',300);
+catch
+    saveas(fig, fullfile(outdir,[fname '.pdf']));
+    saveas(fig, fullfile(outdir,[fname '.png']));
+end
+end
+
+function cl = symmetric_or_data_limits_s7d(vals, reverse_y)
+% Stable color limits for heatmaps.
+vals = vals(isfinite(vals));
+if isempty(vals)
+    cl = [NaN NaN];
+    return;
+end
+lo = min(vals); hi = max(vals);
+if lo == hi
+    pad = max(abs(lo)*0.1, 0.1);
+    cl = [lo-pad hi+pad];
+else
+    cl = [lo hi];
+end
+% For z-scored style plots around zero, make the scale symmetric when values cross zero.
+if lo < 0 && hi > 0
+    mx = max(abs([lo hi]));
+    cl = [-mx mx];
+end
+% reverse_y does not change the color direction; it only affects axis plots.
+end
+
+
+function plot_component_by_transition(gt, feat, ylbl, ttl, outdir, fname, reverse_y, mode)
+%PLOT_COMPONENT_BY_TRANSITION  Stage profiles split by recent block transition.
+% mode = 'outcome'   : two panels, Incorrect and Correct, true feedback only.
+% mode = 'incorrect' : one panel, incorrect true-feedback trials only.
+% mode = 'all'       : one panel, all true-feedback trials.
+if nargin < 8 || isempty(mode), mode = 'all'; end
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
+
+stages = {'LN','LE','RN','RE'};
+transitions = {'D->D','D->P','P->D','P->P'};
+trans_labels = {'D->D','D->P','P->D','P->P'};
+trans_cols = [0.12 0.47 0.71; 0.85 0.33 0.10; 0.47 0.67 0.19; 0.80 0.20 0.60];
+
+switch char(mode)
+    case 'outcome'
+        panel_defs = {outcome_mask_local(gt,0), 'Incorrect true-feedback trials'; ...
+                      outcome_mask_local(gt,1), 'Correct true-feedback trials'};
+    case 'incorrect'
+        panel_defs = {outcome_mask_local(gt,0), 'Incorrect true-feedback trials'};
+    otherwise
+        panel_defs = {true(height(gt),1), 'All true-feedback trials'};
+end
+
+fig = figure('Position',[50 50 620*size(panel_defs,1) 520]);
+sgtitle(ttl, 'Interpreter','none');
+
+for pi = 1:size(panel_defs,1)
+    ax = subplot(1,size(panel_defs,1),pi); hold(ax,'on');
+    title(ax, panel_defs{pi,2}, 'FontSize',10);
+    base_mask = panel_defs{pi,1} & true_feedback_mask_local(gt) & ~is_first_transition_local(gt);
+
+    for ti = 1:numel(transitions)
+        means = nan(1,numel(stages));
+        sems  = nan(1,numel(stages));
+        ns    = nan(1,numel(stages));
+        for si = 1:numel(stages)
+            m = base_mask & string(gt.transition_recent)==transitions{ti} & string(gt.stage)==stages{si} & ~isnan(gt.(feat));
+            vals = subject_means_local(gt, feat, m);
+            [means(si), sems(si), ns(si)] = mean_sem_n_local(vals);
+        end
+        errorbar(ax,1:numel(stages),means,sems,'-o', ...
+            'Color',trans_cols(ti,:), 'MarkerFaceColor',trans_cols(ti,:), ...
+            'LineWidth',1.7, 'DisplayName',trans_labels{ti});
+        for si = 1:numel(stages)
+            if ~isnan(means(si))
+                text(ax, si, means(si), sprintf(' n=%d', ns(si)), ...
+                    'Color',trans_cols(ti,:), 'FontSize',7, ...
+                    'VerticalAlignment','bottom', 'Clipping','off');
+            end
+        end
+    end
+
+    set(ax,'XTick',1:numel(stages),'XTickLabel',stages);
+    xlabel(ax,'Stage'); ylabel(ax,ylbl,'Interpreter','none');
+    if reverse_y, set(ax,'YDir','reverse'); end
+    legend(ax,'Box','off','Location','best');
+    axis(ax,'square');
+end
+
+exportgraphics(fig, fullfile(outdir,[fname '.pdf']), 'ContentType','vector');
+end
+
+function plot_component_by_priorP(gt, feat, ylbl, ttl, outdir, fname, reverse_y, mode)
+%PLOT_COMPONENT_BY_PRIORP  n_prev_P profiles split by stage and current D/P block.
+% X axis is prior P exposure: 0, 1, 2+. Lines show stage. Columns show current
+% block type. For outcome-sensitive measures, rows split Incorrect/Correct.
+if nargin < 8 || isempty(mode), mode = 'all'; end
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
+
+stages = {'LN','LE','RN','RE'};
+stage_cols = [0.12 0.62 0.47; 0.85 0.65 0.00; 0.80 0.27 0.13; 0.40 0.25 0.65];
+npp_bins = {'0','1','2+'};
+btypes = {'D','P'};
+
+switch char(mode)
+    case 'outcome'
+        row_defs = {outcome_mask_local(gt,0), 'Incorrect'; ...
+                    outcome_mask_local(gt,1), 'Correct'};
+    case 'incorrect'
+        row_defs = {outcome_mask_local(gt,0), 'Incorrect'};
+    otherwise
+        row_defs = {true(height(gt),1), 'All outcomes'};
+end
+
+fig = figure('Position',[50 50 1050 430*size(row_defs,1)]);
+sgtitle(ttl, 'Interpreter','none');
+
+for ri = 1:size(row_defs,1)
+    for bi = 1:numel(btypes)
+        ax = subplot(size(row_defs,1), numel(btypes), (ri-1)*numel(btypes)+bi); hold(ax,'on');
+        title(ax, sprintf('%s | current %s block', row_defs{ri,2}, btypes{bi}), 'FontSize',10);
+        base_mask = row_defs{ri,1} & true_feedback_mask_local(gt) & string(gt.block_type_s)==btypes{bi};
+
+        for si = 1:numel(stages)
+            means = nan(1,numel(npp_bins));
+            sems  = nan(1,numel(npp_bins));
+            ns    = nan(1,numel(npp_bins));
+            for ni = 1:numel(npp_bins)
+                m = base_mask & string(gt.stage)==stages{si} & string(gt.n_prev_P_bin)==npp_bins{ni} & ~isnan(gt.(feat));
+                vals = subject_means_local(gt, feat, m);
+                [means(ni), sems(ni), ns(ni)] = mean_sem_n_local(vals);
+            end
+            errorbar(ax,1:numel(npp_bins),means,sems,'-o', ...
+                'Color',stage_cols(si,:), 'MarkerFaceColor',stage_cols(si,:), ...
+                'LineWidth',1.7, 'DisplayName',stages{si});
+            for ni = 1:numel(npp_bins)
+                if ~isnan(means(ni))
+                    text(ax, ni, means(ni), sprintf(' n=%d', ns(ni)), ...
+                        'Color',stage_cols(si,:), 'FontSize',7, ...
+                        'VerticalAlignment','bottom', 'Clipping','off');
+                end
+            end
+        end
+
+        set(ax,'XTick',1:numel(npp_bins),'XTickLabel',{'0','1','2+'});
+        xlabel(ax,'Number of prior P blocks'); ylabel(ax,ylbl,'Interpreter','none');
+        if reverse_y, set(ax,'YDir','reverse'); end
+        legend(ax,'Box','off','Location','best');
+        axis(ax,'square');
+    end
+end
+
+exportgraphics(fig, fullfile(outdir,[fname '.pdf']), 'ContentType','vector');
+end
+
+
+function [sig_line, anova_T] = lme_sigline_for_panel_local(gt, feat, base_mask, model_kind, outdir, fname, panel_tag)
+%LME_SIGLINE_FOR_PANEL_LOCAL  Fit the model used for plot annotations.
+% Stars are omnibus LME term stars, not uncorrected pairwise tests.
+%   transition model: y ~ stage * transition_recent + (1|subj_id)
+%   priorP model    : y ~ stage * n_prev_P_bin     + (1|subj_id)
+if nargin < 7 || isempty(panel_tag), panel_tag = 'panel'; end
+sig_line = 'LME: n/a';
+anova_T = table();
+try
+    use_mask = base_mask & ~isnan(gt.(feat));
+    Tm = gt(use_mask, :);
+    if height(Tm) < 12 || numel(unique(string(Tm.subj_id))) < 4
+        sig_line = 'LME: too few rows';
+        return;
+    end
+    Tm.subj_id = categorical(string(Tm.subj_id));
+    Tm.stage = categorical(string(Tm.stage), {'LN','LE','RN','RE'});
+    switch char(model_kind)
+        case 'transition'
+            Tm.transition_recent = categorical(string(Tm.transition_recent), {'D->D','D->P','P->D','P->P'});
+            Tm = Tm(~isundefined(Tm.stage) & ~isundefined(Tm.transition_recent), :);
+            if height(Tm) < 12 || numel(categories(removecats(Tm.transition_recent))) < 2
+                sig_line = 'LME: insufficient transition levels';
+                return;
+            end
+            form = sprintf('%s ~ stage * transition_recent + (1|subj_id)', feat);
+            main_term = 'transition_recent';
+            int_term  = 'stage:transition_recent';
+            main_label = 'Transition';
+            int_label  = 'Stage x transition';
+        case 'priorP'
+            Tm.n_prev_P_bin = categorical(string(Tm.n_prev_P_bin), {'0','1','2+'});
+            Tm = Tm(~isundefined(Tm.stage) & ~isundefined(Tm.n_prev_P_bin), :);
+            if height(Tm) < 12 || numel(categories(removecats(Tm.n_prev_P_bin))) < 2
+                sig_line = 'LME: insufficient prior-P levels';
+                return;
+            end
+            form = sprintf('%s ~ stage * n_prev_P_bin + (1|subj_id)', feat);
+            main_term = 'n_prev_P_bin';
+            int_term  = 'stage:n_prev_P_bin';
+            main_label = 'nPrevP';
+            int_label  = 'Stage x nPrevP';
+        otherwise
+            sig_line = 'LME: unknown model';
+            return;
+    end
+    mdl = fitlme(Tm, form, 'FitMethod','REML');
+    A = anova(mdl);
+    anova_T = local_anova_to_table(A);
+    p_main = local_get_anova_p(anova_T, main_term);
+    p_int  = local_get_anova_p(anova_T, int_term);
+    sig_line = sprintf('LME: %s %s; %s %s', main_label, p_to_stars_local(p_main), int_label, p_to_stars_local(p_int));
+    if nargin >= 5 && ~isempty(outdir) && exist(outdir,'dir')
+        safe_panel = matlab.lang.makeValidName(char(panel_tag));
+        safe_fname = matlab.lang.makeValidName(char(fname));
+        out_csv = fullfile(outdir, sprintf('%s_LME_%s.csv', safe_fname, safe_panel));
+        try
+            anova_T.model_formula = repmat(string(form), height(anova_T), 1);
+            anova_T.panel = repmat(string(panel_tag), height(anova_T), 1);
+            writetable(anova_T, out_csv);
+        catch
+        end
+    end
+catch ME
+    sig_line = sprintf('LME unavailable: %s', ME.message);
+    if strlength(string(sig_line)) > 85
+        sig_line = extractBefore(string(sig_line), 86);
+        sig_line = char(sig_line + "...");
+    end
+end
+end
+
+function T = local_anova_to_table(A)
+% Convert LinearMixedModel anova output to a plain table with a Term column.
+try
+    T = struct2table(table2struct(A));
+catch
+    try
+        T = dataset2table(A);
+    catch
+        T = table();
+        return;
+    end
+end
+if ~ismember('Term', T.Properties.VariableNames)
+    rn = T.Properties.RowNames;
+    if ~isempty(rn)
+        T.Term = string(rn(:));
+    elseif ismember('Name', T.Properties.VariableNames)
+        T.Term = string(T.Name);
+    else
+        T.Term = strings(height(T),1);
+    end
+end
+end
+
+function p = local_get_anova_p(T, term)
+p = NaN;
+if isempty(T) || ~ismember('Term', T.Properties.VariableNames), return; end
+names = string(T.Properties.VariableNames);
+pcol = "";
+for cand = ["pValue","pvalue","pVal","p","Prob_F","ProbF"]
+    hit = find(strcmpi(names, cand), 1);
+    if ~isempty(hit), pcol = names(hit); break; end
+end
+if pcol == ""
+    hit = find(contains(lower(names), 'p'), 1);
+    if ~isempty(hit), pcol = names(hit); end
+end
+if pcol == "", return; end
+terms = string(T.Term);
+idx = find(strcmp(terms, string(term)), 1);
+if isempty(idx)
+    idx = find(contains(terms, string(term)), 1);
+end
+if ~isempty(idx)
+    try
+        p = double(T.(pcol)(idx));
+    catch
+        p = NaN;
+    end
+end
+end
+
+function s = p_to_stars_local(p)
+if isnan(p)
+    s = 'n/a';
+elseif p < 0.001
+    s = '***';
+elseif p < 0.01
+    s = '**';
+elseif p < 0.05
+    s = '*';
+elseif p < 0.10
+    s = '†';
+else
+    s = 'ns';
+end
+end
+
+function add_lme_sig_text_local(ax, sig_line)
+% Add unobtrusive model-term stars to a plot panel.
+try
+    text(ax, 0.02, 0.98, sig_line, 'Units','normalized', ...
+        'VerticalAlignment','top', 'HorizontalAlignment','left', ...
+        'FontSize',7, 'FontWeight','bold', 'BackgroundColor','w', ...
+        'Margin',2, 'Interpreter','none', 'Clipping','off');
+catch
+end
+end
+
+function m = true_feedback_mask_local(T)
+if ismember('false_fb', T.Properties.VariableNames)
+    m = ~logical(T.false_fb);
+else
+    m = true(height(T),1);
+end
+end
+
+function m = is_first_transition_local(T)
+if ismember('transition_recent', T.Properties.VariableNames)
+    m = string(T.transition_recent)=="first" | string(T.transition_recent)=="unknown";
+else
+    m = false(height(T),1);
+end
+end
+
+function m = outcome_mask_local(T, code)
+%OUTCOME_MASK_LOCAL  Robust correct/incorrect mask for numeric/categorical/string.
+if ~ismember('correct', T.Properties.VariableNames)
+    m = false(height(T),1);
+    return;
+end
+c = T.correct;
+if isnumeric(c) || islogical(c)
+    m = double(c) == double(code);
+else
+    cs = lower(string(c));
+    if code == 1
+        m = cs=="1" | cs=="correct" | cs=="true" | cs=="win";
+    else
+        m = cs=="0" | cs=="incorrect" | cs=="false" | cs=="loss" | cs=="error";
+    end
+end
+end
+
+function vals = subject_means_local(T, feat, mask)
+%SUBJECT_MEANS_LOCAL  One value per subject for a condition cell.
+subs = unique(string(T.subj_id(mask)));
+vals = nan(numel(subs),1);
+for si = 1:numel(subs)
+    sm = mask & string(T.subj_id)==subs(si);
+    vals(si) = mean(T.(feat)(sm), 'omitnan');
+end
+vals = vals(~isnan(vals));
+end
+
+function [mn, se, n] = mean_sem_n_local(vals)
+vals = vals(~isnan(vals));
+n = numel(vals);
+if n == 0
+    mn = NaN; se = NaN;
+elseif n == 1
+    mn = vals(1); se = NaN;
+else
+    mn = mean(vals,'omitnan');
+    se = std(vals,'omitnan') / sqrt(n);
+end
+end
+
+% =========================================================================
+%% PLOTTING SCALE HELPERS
+% =========================================================================
+function [feat, ylbl, reverse_y] = resolve_plot_feature(T, measure_key, plot_scale)
+%RESOLVE_PLOT_FEATURE  Return a valid feature column for plotting.
+% measure_key options used here: prefrontal_mean, P300, Theta, PLV_fp, PLV_fs.
+% reverse_y is true only for negative-going frontocentral amplitude plots.
+
+plot_scale = lower(string(plot_scale));
+reverse_y = false;
+
+switch char(measure_key)
+    case 'prefrontal_mean'
+        reverse_y = true;  % more negative = larger frontocentral negativity
+        raw_col  = 'prefrontal_mean_amp';
+        norm_col = 'prefrontal_mean_norm';
+        z_col    = 'prefrontal_mean_norm_z';
+        raw_lbl  = 'Prefrontal negative peak (uV; more negative = larger FN)';
+        norm_lbl = 'Prefrontal negative peak / baseline RMS (more negative = larger FN)';
+        z_lbl    = 'Prefrontal negative peak (within-subject z; more negative = larger FN)';
+    case 'P300'
+        raw_col  = 'P300_amp';
+        norm_col = 'P300_norm';
+        z_col    = 'P300_norm_z';
+        raw_lbl  = 'P300 amplitude (uV)';
+        norm_lbl = 'P300 amplitude / baseline RMS';
+        z_lbl    = 'P300 amplitude (within-subject z)';
+    case 'Theta'
+        raw_col  = 'Theta_amp';
+        norm_col = 'Theta_amp';
+        z_col    = 'Theta_amp_z';
+        raw_lbl  = 'Theta amplitude (baseline-corrected)';
+        norm_lbl = 'Theta amplitude (baseline-corrected)';
+        z_lbl    = 'Theta amplitude (within-subject z)';
+    case 'PLV_fp'
+        raw_col  = 'PLV_fp';
+        norm_col = 'PLV_fp';
+        z_col    = 'PLV_fp_z';
+        raw_lbl  = 'Fronto-parietal PLV (baseline-corrected)';
+        norm_lbl = 'Fronto-parietal PLV (baseline-corrected)';
+        z_lbl    = 'Fronto-parietal PLV (within-subject z)';
+    case 'PLV_fs'
+        raw_col  = 'PLV_fs';
+        norm_col = 'PLV_fs';
+        z_col    = 'PLV_fs_z';
+        raw_lbl  = 'Fronto-somatosensory PLV (baseline-corrected)';
+        norm_lbl = 'Fronto-somatosensory PLV (baseline-corrected)';
+        z_lbl    = 'Fronto-somatosensory PLV (within-subject z)';
+    otherwise
+        error('Unknown measure_key: %s', measure_key);
+end
+
+switch char(plot_scale)
+    case 'z'
+        candidates = {z_col, norm_col, raw_col};
+        labels     = {z_lbl, norm_lbl, raw_lbl};
+    case 'norm'
+        candidates = {norm_col, raw_col, z_col};
+        labels     = {norm_lbl, raw_lbl, z_lbl};
+    case 'raw'
+        candidates = {raw_col, norm_col, z_col};
+        labels     = {raw_lbl, norm_lbl, z_lbl};
+    otherwise
+        error('PLOT_SCALE must be ''z'', ''norm'', or ''raw''.');
+end
+
+feat = '';
+ylbl = '';
+for i = 1:numel(candidates)
+    if ismember(candidates{i}, T.Properties.VariableNames)
+        feat = candidates{i};
+        ylbl = labels{i};
+        return;
+    end
+end
+
+error('No valid plot column found for %s using PLOT_SCALE=%s.', measure_key, plot_scale);
+end
+
+function cols = outcome_colors_for_categories(ycats)
+%OUTCOME_COLORS_FOR_CATEGORIES  Keep Incorrect red and Correct green.
+% Handles numeric category labels 0/1 and text labels Incorrect/Correct.
+
+cols = nan(numel(ycats), 3);
+for i = 1:numel(ycats)
+    lab = lower(char(ycats{i}));
+    if strcmp(lab,'0') || contains(lab,'incorrect') || contains(lab,'error') || contains(lab,'loss')
+        cols(i,:) = [0.70 0.10 0.10];  % Incorrect = red
+    elseif strcmp(lab,'1') || contains(lab,'correct') || contains(lab,'win')
+        cols(i,:) = [0.10 0.60 0.10];  % Correct = green
+    else
+        fallback = [0.15 0.45 0.70; 0.80 0.30 0.10; 0.65 0.25 0.65; 0.3 0.3 0.3];
+        cols(i,:) = fallback(min(i,size(fallback,1)),:);
+    end
+end
+end
+
 % =========================================================================
 %% PLOTTING HELPERS  (corrected versions)
 % =========================================================================
 
-function plot_lme_effects(gt, feat, xvar, yvar, yvar_labels, ttl, outdir, fname)
+function plot_lme_effects(gt, feat, xvar, yvar, yvar_labels, ttl, outdir, fname, ylbl, reverse_y)
 %PLOT_LME_EFFECTS  Plot cell-means with SEM ± p-values (corrected).
 %
 %  FIX 4: yvar_labels allows caller to supply readable labels instead of
 %          relying on the raw category names (e.g. '0'/'1').
 %  FIX 6: uses ttest (paired within subjects) not ttest2 for p-value
 %          annotation when subjects appear in both y-groups at each x-level.
+
+if nargin < 9 || isempty(ylbl), ylbl = feat; end
+if nargin < 10 || isempty(reverse_y), reverse_y = false; end
 
 if ~iscategorical(gt.(xvar)), gt.(xvar) = categorical(gt.(xvar)); end
 
@@ -910,8 +1791,8 @@ end
 
 xcats = categories(gt.(xvar));
 ycats = categories(gt.(yvar));
-cols  = [0.1 0.6 0.1; 0.7 0.1 0.1; 0.15 0.45 0.70; 0.80 0.30 0.10];
-cols  = cols(1:min(numel(ycats), size(cols,1)), :);
+cols  = outcome_colors_for_categories(ycats);
+
 
 x = 1:numel(xcats);
 
@@ -984,9 +1865,10 @@ if numel(ycats) == 2
 end
 
 yline(0, '--k')
+if reverse_y, set(ax,'YDir','reverse'); end
 set(ax,'XTick',x,'XTickLabel',xcats);
 xlabel(ax,xvar,'Interpreter','none');
-ylabel(ax,feat,'Interpreter','none');
+ylabel(ax,ylbl,'Interpreter','none');
 title(ax,ttl);
 legend(ax,'Box','off');
 yl = ylim(ax);
@@ -997,8 +1879,9 @@ exportgraphics(fig, fullfile(outdir,[fname '.pdf']), 'ContentType','vector');
 end
 
 
-function plot_stage_bar(gt_sub, feat, ylbl, ttl, outdir, fname)
+function plot_stage_bar(gt_sub, feat, ylbl, ttl, outdir, fname, reverse_y)
 %PLOT_STAGE_BAR  Bar chart per stage with D and P block types.
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
 %  FIX 3: direct string comparison instead of categorical({...}).
 
 stages = {'LN','LE','RN','RE'};
@@ -1049,14 +1932,352 @@ ylabel(ax,ylbl,'Interpreter','none');
 % Deduplicate legend
 h = findobj(ax,'Type','bar');
 legend(ax,h(end:-1:1),{'D','P'},'Box','off','Location','best');
+if reverse_y, set(ax,'YDir','reverse'); end
 exportgraphics(fig,fullfile(outdir,[fname '.pdf']),'ContentType','vector');
 % close(fig);
 
 end
 
 
-function plot_confidence_fRN(gt_inc, outdir)
-%PLOT_CONFIDENCE_FRN  Scatter + regression: confidence vs FN (incorrect only).
+
+function plot_confidence_fRN_extended(gt, gt_inc, gt_p, outdir, fn_feat, fn_ylbl, reverse_y)
+%PLOT_CONFIDENCE_FRN_EXTENDED
+% Expanded RQ2 plotting suite for S7d. Produces no-line binned scatter/CI plots:
+%   A) FN vs confidence: all trials, incorrect trials, correct trials; split D/P.
+%   B) P-block false-feedback confidence model: true/false feedback x outcome.
+%   C) FN vs RW value and RW prediction error (PE), if those columns exist.
+%
+% Significance annotations are LME-based, not raw correlations. The displayed
+% y-variable follows PLOT_SCALE (fn_feat), while model stars use the z-scored
+% prefrontal negativity column for consistency with the rest of S7.
+if nargin < 5 || isempty(fn_feat), fn_feat = 'prefrontal_mean_norm_z'; end
+if nargin < 6 || isempty(fn_ylbl), fn_ylbl = 'Feedback negativity'; end
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
+
+if ~ismember(fn_feat, gt.Properties.VariableNames)
+    warning('S7d RQ2: plot variable %s missing. Falling back to prefrontal_mean_norm_z.', fn_feat);
+    fn_feat = 'prefrontal_mean_norm_z';
+    fn_ylbl = 'Feedback negativity (z)';
+end
+model_y = 'prefrontal_mean_norm_z';
+if ~ismember(model_y, gt.Properties.VariableNames)
+    model_y = fn_feat;
+end
+
+rq2_dir = fullfile(outdir, 'RQ2_confidence_value_PE');
+if ~exist(rq2_dir, 'dir'), mkdir(rq2_dir); end
+
+% -------------------------------------------------------------------------
+% Figure A: confidence slopes for all, incorrect, and correct trials.
+% -------------------------------------------------------------------------
+T_all = rq2_prepare_predictor_table(gt, 'confidence', fn_feat, model_y);
+T_inc = rq2_prepare_predictor_table(gt(gt.correct_num==0, :), 'confidence', fn_feat, model_y);
+T_cor = rq2_prepare_predictor_table(gt(gt.correct_num==1, :), 'confidence', fn_feat, model_y);
+Tset  = {T_all, T_inc, T_cor};
+row_lbl = {'All trials','Incorrect trials','Correct trials'};
+file_lbl = {'all','incorrect','correct'};
+
+figA = figure('Position',[40 40 1050 900]);
+sgtitle({'RQ2: Confidence × prefrontal negativity', ...
+    'Binned no-line view; columns split by block type; stars from LME slope terms'}, ...
+    'FontSize',12);
+
+for ri = 1:3
+    T = Tset{ri};
+    sig_line = rq2_fit_and_sigline(T, model_y, 'conf_z * block_type + stage + (stage | subj_id)', ...
+        {'conf_z','conf_z:block_type'}, {'conf','conf×block'})
+    for bi = 1:2
+        bt = {'D','P'};
+        ax = subplot(3,2,(ri-1)*2+bi); hold(ax,'on');
+        title(ax, sprintf('%s | %s block', row_lbl{ri}, bt{bi}), 'FontSize',9);
+        mask = T.block_type == bt{bi};
+        rq2_binned_scatter_no_line(ax, T.conf_z(mask), T.y_plot(mask), [0.45 0.45 0.45], ...
+            'Confidence (within-subject z)', fn_ylbl);
+        add_lme_sig_text_local(ax, sig_line);
+        if reverse_y, set(ax,'YDir','reverse'); end
+        axis(ax,'square');
+    end
+    try
+        writetable(rq2_lme_table(T, model_y, 'conf_z * block_type + stage + (stage| subj_id)'), ...
+            fullfile(rq2_dir, sprintf('RQ2_confidence_%s_LME_coefficients.csv', file_lbl{ri})));
+    catch
+    end
+end
+exportgraphics(figA, fullfile(rq2_dir, 'RQ2A_FN_confidence_all_incorrect_correct.pdf'), 'ContentType','vector');
+exportgraphics(figA, fullfile(rq2_dir, 'RQ2A_FN_confidence_all_incorrect_correct.png'), 'Resolution',300);
+
+% -------------------------------------------------------------------------
+% Figure B: false feedback model in P blocks, split by outcome and feedback type.
+% -------------------------------------------------------------------------
+if ~isempty(gt_p) && height(gt_p) > 10
+    Tp = rq2_prepare_predictor_table(gt_p, 'confidence', fn_feat, model_y);
+    Tp.false_fb_cat = categorical(double(Tp.false_fb), [0 1], {'TrueFB','FalseFB'});
+    Tp.correct_cat  = categorical(double(Tp.correct_num), [0 1], {'Incorrect','Correct'});
+    sig_false = rq2_fit_and_sigline(Tp, model_y, ...
+        'conf_z * false_fb * correct_cat + stage + (stage | subj_id)', ...
+        {'conf_z','conf_z:false_fb_cat','conf_z:correct_cat','conf_z:false_fb_cat:correct_cat'}, ...
+        {'conf','conf×falseFB','conf×outcome','3-way'});
+
+    figB = figure('Position',[60 60 1050 760]);
+    sgtitle({'RQ2: P-block false-feedback confidence model', ...
+        'Split by outcome and feedback validity; stars from LME terms'}, 'FontSize',12);
+    outcomes = {'Incorrect','Correct'};
+    fblabs   = {'TrueFB','FalseFB'};
+    fbcols   = {[0.15 0.45 0.70], [0.80 0.30 0.10]};
+    for oi = 1:2
+        for fi = 1:2
+            ax = subplot(2,2,(oi-1)*2+fi); hold(ax,'on');
+            title(ax, sprintf('%s | %s', outcomes{oi}, fblabs{fi}), 'FontSize',10);
+            mask = Tp.correct_cat == outcomes{oi} & Tp.false_fb_cat == fblabs{fi};
+            rq2_binned_scatter_no_line(ax, Tp.conf_z(mask), Tp.y_plot(mask), fbcols{fi}, ...
+                'Confidence (within-subject z)', fn_ylbl);
+            add_lme_sig_text_local(ax, sig_false);
+            if reverse_y, set(ax,'YDir','reverse'); end
+            axis(ax,'square');
+        end
+    end
+    try
+        writetable(rq2_lme_table(Tp, model_y, 'conf_z * false_fb_cat * correct_cat + stage + (1 | subj_id)'), ...
+            fullfile(rq2_dir, 'RQ2_false_feedback_confidence_LME_coefficients.csv'));
+    catch
+    end
+    exportgraphics(figB, fullfile(rq2_dir, 'RQ2B_FN_confidence_falseFB_by_outcome.pdf'), 'ContentType','vector');
+    exportgraphics(figB, fullfile(rq2_dir, 'RQ2B_FN_confidence_falseFB_by_outcome.png'), 'Resolution',300);
+else
+    warning('S7d RQ2: skipping false-feedback confidence plot; too few P-block rows.');
+end
+
+% -------------------------------------------------------------------------
+% Figure C: RW value and PE modulation, if available.
+% -------------------------------------------------------------------------
+pred_specs = rq2_find_rw_predictors(gt);
+if isempty(pred_specs)
+    figC = figure('Position',[80 80 900 300]);
+    axis off;
+    text(0.5,0.55,{'RW value / PE columns were not found in gt.', ...
+        'Expected common names include value, Value, rw_value, PE, pe, prediction_error, rw_PE.'}, ...
+        'HorizontalAlignment','center','FontSize',11);
+    exportgraphics(figC, fullfile(rq2_dir, 'RQ2C_FN_RW_value_PE_missing.pdf'), 'ContentType','vector');
+else
+    figC = figure('Position',[40 40 1150 760]);
+    sgtitle({'RQ2: RW value and prediction-error modulation of prefrontal negativity', ...
+        'Binned no-line view; columns split by outcome; stars from LME slope terms'}, 'FontSize',12);
+    outcome_tabs = {'All','Incorrect','Correct'};
+    for pi = 1:size(pred_specs,1)
+        pred_col = pred_specs{pi,1};
+        pred_lbl = pred_specs{pi,2};
+        Tpred = rq2_prepare_predictor_table(gt, pred_col, fn_feat, model_y);
+        Tpred.correct_cat = categorical(double(Tpred.correct_num), [0 1], {'Incorrect','Correct'});
+        sig_pred = rq2_fit_and_sigline(Tpred, model_y, ...
+            'pred_z * correct_cat + block_type + stage + (stage | subj_id)', ...
+            {'pred_z','pred_z:correct_cat'}, {pred_lbl,[pred_lbl '×outcome']});
+        for oi = 1:3
+            ax = subplot(size(pred_specs,1),3,(pi-1)*3+oi); hold(ax,'on');
+            title(ax, sprintf('%s | %s', pred_lbl, outcome_tabs{oi}), 'FontSize',10);
+            if oi == 1
+                mask = true(height(Tpred),1);
+            elseif oi == 2
+                mask = Tpred.correct_num == 0;
+            else
+                mask = Tpred.correct_num == 1;
+            end
+            rq2_binned_scatter_no_line(ax, Tpred.pred_z(mask), Tpred.y_plot(mask), [0.35 0.35 0.35], ...
+                [pred_lbl ' (within-subject z)'], fn_ylbl);
+            add_lme_sig_text_local(ax, sig_pred);
+            if reverse_y, set(ax,'YDir','reverse'); end
+            axis(ax,'square');
+        end
+        try
+            writetable(rq2_lme_table(Tpred, model_y, 'pred_z * correct_cat + block_type + stage + (1 | subj_id)'), ...
+                fullfile(rq2_dir, sprintf('RQ2_%s_LME_coefficients.csv', matlab.lang.makeValidName(pred_col))));
+        catch
+        end
+    end
+    exportgraphics(figC, fullfile(rq2_dir, 'RQ2C_FN_RW_value_PE.pdf'), 'ContentType','vector');
+    exportgraphics(figC, fullfile(rq2_dir, 'RQ2C_FN_RW_value_PE.png'), 'Resolution',300);
+end
+
+fprintf('Expanded RQ2 confidence/value/PE plots saved to:\n  %s\n', rq2_dir);
+end
+
+function T = rq2_prepare_predictor_table(Tin, pred_col, y_plot_col, y_model_col)
+% Prepare a table with y_plot, y_model, pred_z and common categorical fields.
+T = Tin;
+if ~ismember('correct_num', T.Properties.VariableNames)
+    if ismember('correct', T.Properties.VariableNames)
+        T.correct_num = double(T.correct);
+    else
+        T.correct_num = nan(height(T),1);
+    end
+end
+if ~ismember(pred_col, T.Properties.VariableNames)
+    error('S7d RQ2: predictor column %s missing.', pred_col);
+end
+if ~ismember(y_plot_col, T.Properties.VariableNames)
+    error('S7d RQ2: y-plot column %s missing.', y_plot_col);
+end
+if ~ismember(y_model_col, T.Properties.VariableNames)
+    y_model_col = y_plot_col;
+end
+T.y_plot  = double(T.(y_plot_col));
+T.y_model = double(T.(y_model_col));
+T.pred_raw = double(T.(pred_col));
+T.pred_z = nan(height(T),1);
+T.conf_z = nan(height(T),1);
+subs = unique(T.subj_id);
+for si = 1:numel(subs)
+    sm = T.subj_id == subs(si);
+    x = T.pred_raw(sm);
+    if sum(~isnan(x)) > 1 && std(x,'omitnan') > 0
+        T.pred_z(sm) = (x - mean(x,'omitnan')) ./ std(x,'omitnan');
+    end
+    if ismember('confidence', T.Properties.VariableNames)
+        c = double(T.confidence(sm));
+        if sum(~isnan(c)) > 1 && std(c,'omitnan') > 0
+            T.conf_z(sm) = (c - mean(c,'omitnan')) ./ std(c,'omitnan');
+        end
+    end
+end
+T = T(~isnan(T.y_plot) & ~isnan(T.y_model), :);
+if ismember('block_type', T.Properties.VariableNames)
+    T.block_type = categorical(string(T.block_type), {'D','P'});
+end
+if ismember('stage', T.Properties.VariableNames)
+    T.stage = categorical(string(T.stage), {'LN','LE','RN','RE'}, 'Ordinal', true);
+end
+end
+
+function rq2_binned_scatter_no_line(ax, x, y, clr, xlbl, ylbl)
+% Plot faint trial scatter plus quartile binned means and 95% CIs, with no line.
+x = double(x); y = double(y);
+ok = ~isnan(x) & ~isnan(y);
+x = x(ok); y = y(ok);
+if numel(x) < 5
+    text(ax,0.5,0.5,'Too few data','Units','normalized','HorizontalAlignment','center');
+    xlabel(ax,xlbl,'Interpreter','none'); ylabel(ax,ylbl,'Interpreter','none');
+    return;
+end
+scatter(ax, x, y, 7, [0.65 0.65 0.65], 'filled', 'MarkerFaceAlpha', 0.18, 'HandleVisibility','off');
+qs = quantile(x, [0 .25 .5 .75 1]);
+qs = unique(qs);
+if numel(qs) < 3
+    edges = linspace(min(x), max(x), min(5, numel(unique(x))+1));
+else
+    edges = qs;
+end
+for bi = 1:(numel(edges)-1)
+    if bi == numel(edges)-1
+        m = x >= edges(bi) & x <= edges(bi+1);
+    else
+        m = x >= edges(bi) & x < edges(bi+1);
+    end
+    vals = y(m); xs = x(m);
+    vals = vals(~isnan(vals)); xs = xs(~isnan(xs));
+    if numel(vals) < 2, continue; end
+    xm = mean(xs,'omitnan'); ym = mean(vals,'omitnan');
+    ci = 1.96 * std(vals,'omitnan') / sqrt(numel(vals));
+    errorbar(ax, xm, ym, ci, 'o', 'Color', clr, 'MarkerFaceColor', clr, ...
+        'MarkerEdgeColor', 'k', 'MarkerSize', 7, 'LineWidth', 1.3, 'CapSize', 6, ...
+        'HandleVisibility','off');
+    text(ax, xm, ym+ci, sprintf('n=%d', numel(vals)), ...
+        'HorizontalAlignment','center','VerticalAlignment','bottom','FontSize',6, ...
+        'Color',[0.25 0.25 0.25]);
+end
+xline(ax,0,'k:','HandleVisibility','off');
+yline(ax,0,'k:','HandleVisibility','off');
+xlabel(ax,xlbl,'Interpreter','none');
+ylabel(ax,ylbl,'Interpreter','none');
+end
+
+function sig_line = rq2_fit_and_sigline(T, yvar, formula_rhs, terms, labels)
+% Fit LME and return a compact stars string for coefficient terms.
+sig_line = 'LME: unavailable';
+try
+    Tm = T(~isnan(T.y_model), :);
+    if contains(formula_rhs, 'conf_z')
+        Tm = Tm(~isnan(Tm.conf_z), :);
+    end
+    if contains(formula_rhs, 'pred_z')
+        Tm = Tm(~isnan(Tm.pred_z), :);
+    end
+    if height(Tm) < 10
+        sig_line = 'LME: too few rows'; return;
+    end
+    mdl = fitlme(Tm, ['y_model ~ ' formula_rhs], 'FitMethod','REML')
+    C = mdl.Coefficients;
+    bits = strings(1,numel(terms));
+    for ii = 1:numel(terms)
+        p = rq2_find_coef_p(C, terms{ii});
+        bits(ii) = sprintf('%s %s', labels{ii}, p_to_stars_local(p));
+    end
+    sig_line = ['LME: ' char(strjoin(bits, '; '))];
+catch ME
+    sig_line = sprintf('LME failed: %s', ME.message);
+    if numel(sig_line) > 90, sig_line = sig_line(1:90); end
+end
+end
+
+function C = rq2_lme_table(T, yvar, formula_rhs)
+C = table();
+try
+    Tm = T(~isnan(T.y_model), :);
+    if contains(formula_rhs, 'conf_z'), Tm = Tm(~isnan(Tm.conf_z), :); end
+    if contains(formula_rhs, 'pred_z'), Tm = Tm(~isnan(Tm.pred_z), :); end
+    if height(Tm) < 10, return; end
+    mdl = fitlme(Tm, ['y_model ~ ' formula_rhs], 'FitMethod','REML');
+    C = mdl.Coefficients;
+catch
+end
+end
+
+function p = rq2_find_coef_p(C, pattern)
+p = NaN;
+try
+    names = string(C.Name);
+    pat_parts = split(string(pattern), ':');
+    idx = true(numel(names),1);
+    for pp = 1:numel(pat_parts)
+        part = pat_parts(pp);
+        idx = idx & contains(names, part, 'IgnoreCase', true);
+    end
+    % For a main effect, avoid returning an interaction term if possible.
+    if ~contains(string(pattern), ':')
+        idx = idx & ~contains(names, ':');
+    end
+    hit = find(idx, 1);
+    if ~isempty(hit)
+        p = double(C.pValue(hit));
+    end
+catch
+    p = NaN;
+end
+end
+
+function specs = rq2_find_rw_predictors(gt)
+% Return up to two predictor specs: value and PE/prediction error.
+specs = {};
+vars = string(gt.Properties.VariableNames);
+value_candidates = ["value","Value","rw_value","RW_value","model_value","Q","q_value","belief","theta"];
+pe_candidates    = ["PE","pe","rw_PE","RW_PE","prediction_error","pred_error","delta","delta_t","rpe"];
+for c = value_candidates
+    if any(vars == c)
+        specs(end+1,:) = {char(c), 'RW value'}; %#ok<AGROW>
+        break;
+    end
+end
+for c = pe_candidates
+    if any(vars == c)
+        specs(end+1,:) = {char(c), 'RW PE'}; %#ok<AGROW>
+        break;
+    end
+end
+end
+
+function plot_confidence_fRN(gt_inc, outdir, fn_feat, fn_ylbl, reverse_y)
+%PLOT_CONFIDENCE_FRN  Scatter + regression: confidence vs FN.
+if nargin < 3 || isempty(fn_feat), fn_feat = 'prefrontal_mean_norm_z'; end
+if nargin < 4 || isempty(fn_ylbl), fn_ylbl = 'Feedback negativity (z)'; end
+if nargin < 5 || isempty(reverse_y), reverse_y = false; end
 
 fig = figure('Position',[50 50 800 400]);
 sgtitle('RQ2: Confidence × Feedback negativity (incorrect trials only)');
@@ -1067,11 +2288,11 @@ for bt_i = 1:2
     title(ax,sprintf('Block type: %s',bt{bt_i}));
 
     mask = gt_inc.block_type==bt{bt_i} & ...
-           ~isnan(gt_inc.conf_z) & ~isnan(gt_inc.prefrontal_neg_peak_norm_z);
+           ~isnan(gt_inc.conf_z) & ~isnan(gt_inc.(fn_feat));
     if sum(mask) < 5; continue; end
 
     x = gt_inc.conf_z(mask);
-    y = gt_inc.prefrontal_neg_peak_norm_z(mask);
+    y = gt_inc.(fn_feat)(mask);
     ok = ~isnan(x) & ~isnan(y);
 
     scatter(ax,x,y,8,[0.6 0.6 0.6],'filled','HandleVisibility','off');
@@ -1087,7 +2308,8 @@ for bt_i = 1:2
         'FontSize',8,'BackgroundColor','w','Margin',3,'EdgeColor',[0.85 0.85 0.85]);
 
     xlabel(ax,'Confidence (z)');
-    ylabel(ax,'Feedback negativity (z)');
+    ylabel(ax,fn_ylbl,'Interpreter','none');
+    if reverse_y, set(ax,'YDir','reverse'); end
     legend(ax,'Box','off');
     xlim(ax,[-3 3]);
 end
@@ -1097,8 +2319,13 @@ exportgraphics(fig,fullfile(outdir,'RQ2_Confidence_FN.pdf'),'ContentType','vecto
 end
 
 
-function plot_pathway_comparison(gt_fp, gt_fs, outdir)
+function plot_pathway_comparison(gt_fp, gt_fs, outdir, fp_feat, fs_feat, fp_ylbl, fs_ylbl, reverse_y)
 %PLOT_PATHWAY_COMPARISON  FP vs FS PLV by stage, split by block type.
+if nargin < 4 || isempty(fp_feat), fp_feat = 'PLV_fp_z'; end
+if nargin < 5 || isempty(fs_feat), fs_feat = 'PLV_fs_z'; end
+if nargin < 6 || isempty(fp_ylbl), fp_ylbl = fp_feat; end
+if nargin < 7 || isempty(fs_ylbl), fs_ylbl = fs_feat; end
+if nargin < 8 || isempty(reverse_y), reverse_y = false; end
 
 stages = {'LN','LE','RN','RE'};
 bts    = {'D','P'};
@@ -1114,10 +2341,10 @@ for bt_i = 1:2
     fs_means=nan(1,4); fs_sems=nan(1,4); fs_ns=nan(1,4);
 
     for s_i = 1:4
-        m_fp = gt_fp.block_type==bts{bt_i} & gt_fp.stage==stages{s_i} & ~isnan(gt_fp.PLV_fp_z);
-        m_fs = gt_fs.block_type==bts{bt_i} & gt_fs.stage==stages{s_i} & ~isnan(gt_fs.PLV_fs_z);
-        v_fp = gt_fp.PLV_fp_z(m_fp);
-        v_fs = gt_fs.PLV_fs_z(m_fs);
+        m_fp = gt_fp.block_type==bts{bt_i} & gt_fp.stage==stages{s_i} & ~isnan(gt_fp.(fp_feat));
+        m_fs = gt_fs.block_type==bts{bt_i} & gt_fs.stage==stages{s_i} & ~isnan(gt_fs.(fs_feat));
+        v_fp = gt_fp.(fp_feat)(m_fp);
+        v_fs = gt_fs.(fs_feat)(m_fs);
         if ~isempty(v_fp)
             fp_means(s_i)=mean(v_fp,'omitnan'); fp_sems(s_i)=std(v_fp,'omitnan')/sqrt(sum(~isnan(v_fp))); fp_ns(s_i)=sum(~isnan(v_fp));
         end
@@ -1142,7 +2369,8 @@ for bt_i = 1:2
     end
 
     set(ax,'XTick',1:4,'XTickLabel',stages);
-    xlabel(ax,'Stage'); ylabel(ax,'PLV (z)');
+    xlabel(ax,'Stage'); ylabel(ax,[fp_ylbl ' / ' fs_ylbl],'Interpreter','none');
+    if reverse_y, set(ax,'YDir','reverse'); end
     legend(ax,'Box','off');
 end
 exportgraphics(fig,fullfile(outdir,'RQ5_Pathway_comparison.pdf'),'ContentType','vector');
@@ -1150,12 +2378,13 @@ exportgraphics(fig,fullfile(outdir,'RQ5_Pathway_comparison.pdf'),'ContentType','
 
 end
 
-function plot_stage_outcome_lines(gt, feat, ylbl, ttl, outdir, fname)
+function plot_stage_outcome_lines(gt, feat, ylbl, ttl, outdir, fname, reverse_y)
 % Plot one figure: stages on x-axis, split by correct vs incorrect.
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
 
 stages = {'LN','LE','RN','RE'};
-cols   = [0.10 0.60 0.10;   % Correct
-          0.70 0.10 0.10];  % Incorrect
+cols   = [0.70 0.10 0.10;   % Incorrect
+          0.10 0.60 0.10];  % Correct
 
 fig = figure('Position',[50 50 900 450]);
 ax = axes(fig);
@@ -1210,7 +2439,7 @@ set(ax,'XTick',1:4,'XTickLabel',stages);
 xlabel(ax,'Stage');
 ylabel(ax, ylbl);
 legend(ax,'Box','off','Location','best');
-set(ax,'YDir','reverse');   % EEG convention
+if reverse_y, set(ax,'YDir','reverse'); end
 
 yl = ylim(ax);
 ylim(ax, [yl(1)-0.10*range(yl), yl(2)+0.18*range(yl)]);
@@ -1218,10 +2447,11 @@ ylim(ax, [yl(1)-0.10*range(yl), yl(2)+0.18*range(yl)]);
 exportgraphics(fig, fullfile(outdir,[fname '.pdf']), 'ContentType','vector');
 end
 
-function plot_stage_transition_feedback(gt, feat, ylbl, ttl, outdir, fname)
+function plot_stage_transition_feedback(gt, feat, ylbl, ttl, outdir, fname, reverse_y)
 % Two-panel figure:
 %   Left  = D blocks: correct vs incorrect
 %   Right = P blocks: true/false feedback split, each with correct vs incorrect
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
 
 stages = {'LN','LE','RN','RE'};
 
@@ -1229,8 +2459,8 @@ fig = figure('Position',[50 50 1200 450]);
 sgtitle(ttl);
 
 % Colors
-clr_cor   = [0.10 0.60 0.10];
 clr_inc   = [0.70 0.10 0.10];
+clr_cor   = [0.10 0.60 0.10];
 clr_true  = [0.15 0.45 0.70];
 clr_false = [0.80 0.30 0.10];
 
@@ -1248,35 +2478,38 @@ ax1 = subplot(1,2,1);
 hold(ax1,'on');
 title(ax1, 'D blocks');
 plot_one_block_panel(ax1, gt, feat, stages, 'D', false, ...
-    clr_cor, clr_inc, clr_true, clr_false, y_pad, ylbl);
+    clr_cor, clr_inc, clr_true, clr_false, y_pad, ylbl, reverse_y);
 
 % ---------- P panel ----------
 ax2 = subplot(1,2,2);
 hold(ax2,'on');
 title(ax2, 'P blocks');
 plot_one_block_panel(ax2, gt, feat, stages, 'P', true, ...
-    clr_cor, clr_inc, clr_true, clr_false, y_pad, ylbl);
+    clr_cor, clr_inc, clr_true, clr_false, y_pad, ylbl, reverse_y);
 
 exportgraphics(fig, fullfile(outdir,[fname '.pdf']), 'ContentType','vector');
 end
 
-function plot_one_block_panel(ax, gt, feat, stages, bt, is_P, clr_cor, clr_inc, clr_true, clr_false, y_pad, ylbl)
+function plot_one_block_panel(ax, gt, feat, stages, bt, is_P, clr_cor, clr_inc, clr_true, clr_false, y_pad, ylbl, reverse_y)
 
 x = 1:4;
 
 if is_P
-    % Four lines in P: true correct, true incorrect, false correct, false incorrect
+    % Four lines in P. Colour always codes outcome:
+    %   Correct = green, Incorrect = red.
+    % Line style codes feedback validity:
+    %   True feedback = solid, False feedback = dashed.
     spec = {
-        ~gt.false_fb & gt.correct==1, clr_true,  'True correct'
-        ~gt.false_fb & gt.correct==0, clr_true*0.6 + [0.4 0 0], 'True incorrect'
-        gt.false_fb  & gt.correct==1, clr_false, 'False correct'
-        gt.false_fb  & gt.correct==0, clr_false*0.6 + [0.4 0 0], 'False incorrect'
+        ~gt.false_fb & gt.correct==1, clr_cor, 'True correct',  '-'
+        ~gt.false_fb & gt.correct==0, clr_inc, 'True incorrect','-'
+        gt.false_fb  & gt.correct==1, clr_cor, 'False correct', '--'
+        gt.false_fb  & gt.correct==0, clr_inc, 'False incorrect','--'
     };
 else
-    % D: correct vs incorrect only, true feedback only
+    % D: correct vs incorrect only, true feedback only.
     spec = {
-        ~gt.false_fb & gt.correct==1, clr_cor, 'Correct'
-        ~gt.false_fb & gt.correct==0, clr_inc, 'Incorrect'
+        ~gt.false_fb & gt.correct==1, clr_cor, 'Correct',   '-'
+        ~gt.false_fb & gt.correct==0, clr_inc, 'Incorrect', '-'
     };
 end
 
@@ -1284,6 +2517,7 @@ for j = 1:size(spec,1)
     mask_base = spec{j,1} & gt.block_type == bt;
     clr       = spec{j,2};
     lbl       = spec{j,3};
+    ls        = spec{j,4};
 
     means = nan(1,4);
     sems  = nan(1,4);
@@ -1299,8 +2533,9 @@ for j = 1:size(spec,1)
     end
 
     x_off = (j - (size(spec,1)+1)/2) * 0.08;
-    errorbar(ax, x + x_off, means, sems, '-o', ...
+    errorbar(ax, x + x_off, means, sems, 'o', ...
         'Color', clr, 'LineWidth', 1.6, ...
+        'LineStyle', ls, ...
         'MarkerFaceColor', clr, ...
         'DisplayName', lbl);
 
@@ -1318,5 +2553,5 @@ set(ax,'XTick',1:4,'XTickLabel',stages);
 xlabel(ax,'Stage');
 ylabel(ax, ylbl);
 legend(ax,'Box','off','Location','best');
-set(ax,'YDir','reverse');   % EEG convention
+if reverse_y, set(ax,'YDir','reverse'); end
 end

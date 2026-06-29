@@ -3,6 +3,8 @@
 %
 % PIPELINE STEP 7b — EEG feature table validation and quality control.
 %
+% Canonical version: supersedes S7b_EEG_validation_checks_debugged.m
+%
 % PURPOSE
 % -------
 % Produces all recommended data-validation figures and summary tables
@@ -107,15 +109,36 @@ if isempty(gt)
 end
 
 % ── TYPE COERCION ─────────────────────────────────────────────────────────────
-gt.subj_id    = categorical(string(gt.subj_id));
-gt.cohort     = categorical(string(gt.cohort));
-gt.block_type = categorical(string(gt.block_type),{'D','P'});
-gt.stage      = categorical(string(gt.stage),STAGES,'Ordinal',false);
+gt.subj_id = categorical(string(gt.subj_id));
+gt.cohort  = categorical(string(gt.cohort));
 
-if ismember('correct',gt.Properties.VariableNames)
-    gt.correct_num = double(gt.correct);
-elseif ismember('correct_num',gt.Properties.VariableNames)
+% Normalise legacy block labels before categorical conversion.
+% Some older scripts use V for probabilistic/visual-probabilistic blocks.
+bt = string(gt.block_type);
+bt(bt == "V") = "P";
+gt.block_type = categorical(bt, BTYPES);
+
+gt.stage = categorical(string(gt.stage), STAGES, 'Ordinal', false);
+
+% Robust outcome coding. S7 models use 0 = Incorrect and 1 = Correct.
+if ismember('correct_num', gt.Properties.VariableNames)
     gt.correct_num = double(gt.correct_num);
+elseif ismember('correct', gt.Properties.VariableNames)
+    if iscategorical(gt.correct) || isstring(gt.correct) || iscellstr(gt.correct)
+        cstr = lower(string(gt.correct));
+        gt.correct_num = nan(height(gt),1);
+        gt.correct_num(cstr == "correct" | cstr == "1" | cstr == "true") = 1;
+        gt.correct_num(cstr == "incorrect" | cstr == "0" | cstr == "false") = 0;
+    else
+        gt.correct_num = double(gt.correct);
+    end
+else
+    error('S7b: neither correct nor correct_num was found in group_table.');
+end
+% If a categorical Correct/Incorrect column was converted to category codes
+% 1/2, repair it to the required 0/1 coding.
+if all(ismember(unique(gt.correct_num(~isnan(gt.correct_num))), [1 2]))
+    gt.correct_num = gt.correct_num - 1;
 end
 
 if ismember('false_fb',gt.Properties.VariableNames)
@@ -188,6 +211,13 @@ feat_hdrs = FEATURES(:,1)';
 count_T = cell2table(count_rows, ...
     'VariableNames',[{'subj_id','cohort','stage','block_type','outcome','n_beh_trials'}, feat_hdrs]);
 
+% cell2table leaves text columns as cell arrays; convert so later == comparisons work.
+count_T.subj_id    = string(count_T.subj_id);
+count_T.cohort     = categorical(string(count_T.cohort));
+count_T.stage      = categorical(string(count_T.stage), STAGES, 'Ordinal', false);
+count_T.block_type = categorical(string(count_T.block_type), BTYPES);
+count_T.outcome    = categorical(string(count_T.outcome), OUTCOMES);
+
 % Flag cells below threshold
 for fi = 1:N_feat
     raw = FEATURES{fi,1};
@@ -215,10 +245,8 @@ for fi = 1:min(N_feat,3)   % show first 3 features to keep figure manageable
         mat = nan(numel(STAGES),2);   % stages x outcomes
         for stgi = 1:numel(STAGES)
             for oci = 1:2
-                cat_rows = char(count_T.stage)==STAGES{stgi}
-                cat_blocktype = char(count_T.block_type)==BTYPES{bti}
-                cat_outcome = char(count_T.outcome)==OUTCOMES{oci}
-                rows = sum(cat_rows, 2)==2 & cat_blocktype & cat_outcome(:,1) == 1;
+                rows = count_T.stage==STAGES{stgi} & count_T.block_type==BTYPES{bti} & ...
+                    count_T.outcome==OUTCOMES{oci};
                 vals = count_T.(raw)(rows);
                 mat(stgi,oci) = median(vals,'omitnan');
             end
@@ -227,7 +255,7 @@ for fi = 1:min(N_feat,3)   % show first 3 features to keep figure manageable
         imagesc(ax, mat);
         colormap(ax, parula);
         cb = colorbar(ax); cb.Label.String = 'Median N trials';
-        clim(ax, [0 max(mat(:)+1,'omitnan')]);
+        caxis(ax, [0 max(mat(:), [], 'omitnan') + 1]);
 
         % Red contour on cells < MIN_TRIALS_WARN
         for stgi = 1:numel(STAGES)
@@ -299,11 +327,14 @@ for fi = 1:N_feat
 
     if ~ismember(raw,gt.Properties.VariableNames), continue; end
 
-    raw_vals = gt.(raw)(~isnan(gt.(raw)) & ~gt.false_fb);
+    raw_mask = ~isnan(gt.(raw)) & ~gt.false_fb;
+    raw_vals = gt.(raw)(raw_mask);
 
     z_vals = [];
+    z_mask = false(height(gt),1);
     if ismember(zc,gt.Properties.VariableNames)
-        z_vals = gt.(zc)(~isnan(gt.(zc)) & ~gt.false_fb);
+        z_mask = raw_mask & ~isnan(gt.(zc));
+        z_vals = gt.(zc)(z_mask);
     end
 
     fig = figure('Position',[50 50 1400 420]);
@@ -338,7 +369,7 @@ for fi = 1:N_feat
         xline(ax3,-OUTLIER_SD_THRESH,'r--','LineWidth',1.5,'DisplayName',sprintf('±%d SD',OUTLIER_SD_THRESH));
         n_out = sum(abs(z_vals) > OUTLIER_SD_THRESH,'omitnan');
         text(ax3,0.98,0.97,sprintf('Outliers > ±%dSD: %d (%.1f%%)',...
-            OUTLIER_SD_THRESH,n_out,100*n_out/numel(z_vals)),...
+            OUTLIER_SD_THRESH,n_out,100*n_out/max(1,numel(z_vals))),...
             'Units','normalized','HorizontalAlignment','right','VerticalAlignment','top',...
             'FontSize',7,'Color',[0.7 0 0],'BackgroundColor','w');
         xlabel(ax3,'Within-subject z'); ylabel(ax3,'Count');
@@ -350,10 +381,11 @@ for fi = 1:N_feat
     % Panel 4: raw vs z scatter (sanity check of z-scoring)
     ax4 = subplot(1,4,4); hold(ax4,'on');
     title(ax4,'Raw vs z-scored (sanity)');
-    if ~isempty(z_vals) && numel(raw_vals)==numel(z_vals)
-        scatter(ax4,raw_vals,z_vals,4,[0.5 0.5 0.5],'filled','MarkerFaceAlpha',0.15,...
+    if ~isempty(z_vals)
+        raw_z_vals = gt.(raw)(z_mask);
+        scatter(ax4,raw_z_vals,z_vals,4,[0.5 0.5 0.5],'filled','MarkerFaceAlpha',0.15,...
             'HandleVisibility','off');
-        [rv,pv] = corr(raw_vals,z_vals,'Rows','complete');
+        [rv,pv] = corr(raw_z_vals,z_vals,'Rows','complete');
         text(ax4,0.05,0.97,sprintf('r = %.3f\np = %.4f',rv,pv),...
             'Units','normalized','VerticalAlignment','top','FontSize',8,'BackgroundColor','w');
         xlabel(ax4,lbl,'Interpreter','none'); ylabel(ax4,'z-scored');
@@ -472,13 +504,13 @@ for li = 1:size(lat_feats,1)
 
     n_outside = sum(lats < expected(1) | lats > expected(2));
     text(ax,0.98,0.97,sprintf('Outside window: %d (%.1f%%)\nMean: %.1f ms\nSD: %.1f ms',...
-        n_outside,100*n_outside/numel(lats),mean(lats,'omitnan'),std(lats,'omitnan')),...
+        n_outside,100*n_outside/max(1,numel(lats)),mean(lats,'omitnan'),std(lats,'omitnan')),...
         'Units','normalized','HorizontalAlignment','right','VerticalAlignment','top',...
         'FontSize',8,'BackgroundColor','w');
     legend(ax,'Box','off','FontSize',8,'Location','northwest');
 
     fprintf('  %s: N=%d, mean=%.1f ms, SD=%.1f ms, outside window: %d (%.1f%%)\n',...
-        lat_col,numel(lats),mean(lats,'omitnan'),std(lats,'omitnan'),n_outside,100*n_outside/numel(lats));
+        lat_col,numel(lats),mean(lats,'omitnan'),std(lats,'omitnan'),n_outside,100*n_outside/max(1,numel(lats)));
 end
 exportgraphics(fig,fullfile(outdir,'S7b_4_latency_distributions.pdf'),'ContentType','vector');
 
@@ -874,10 +906,10 @@ if ismember('trial_continuous',gt.Properties.VariableNames)
 
         fprintf('  %-35s  median SB r = %.3f  [%.3f – %.3f]\n',...
             raw, median(sh_vals,'omitnan'),...
-            quantile(sh_vals,0.25), quantile(sh_vals,0.75));
+            quantile_omitnan_local(sh_vals,0.25), quantile_omitnan_local(sh_vals,0.75));
 
         row = table({raw},median(sh_vals,'omitnan'),mean(sh_vals,'omitnan'),...
-            quantile(sh_vals,0.25),quantile(sh_vals,0.75),...
+            quantile_omitnan_local(sh_vals,0.25),quantile_omitnan_local(sh_vals,0.75),...
             sum(~isnan(sh_vals)),...
             'VariableNames',{'feature','median_SB_r','mean_SB_r','Q25','Q75','N_subjects'});
         reli_T = [reli_T; row]; %#ok<AGROW>
@@ -1021,7 +1053,7 @@ for fi = 1:N_feat
     for si = 1:N_subj
         for stgi = 1:numel(STAGES)
             for bti = 1:numel(BTYPES)
-                m = gt.subj_id==categorical(subjects{si}) & gt.stage==STAGES{stgi} & ...
+                m = gt.subj_id==subjects{si} & gt.stage==STAGES{stgi} & ...
                     gt.block_type==BTYPES{bti} & ~gt.false_fb & ~isnan(gt.(raw));
                 if sum(m) < MIN_TRIALS_WARN, n_warn = n_warn+1; end
             end
@@ -1051,22 +1083,25 @@ fprintf('S7b complete.\n');
 % =============================================================================
 
 function [h,p] = swtest_local(x)
-% Approximation of the Shapiro-Wilk test using skewness + kurtosis.
-% Uses swtest if available, otherwise falls back to Lilliefors, then KS.
+% Normality test wrapper.
+% Uses swtest if available, then lillietest if available, otherwise a
+% Jarque-Bera chi-square approximation. h = 1 means reject normality at .05.
 x = x(~isnan(x));
-if numel(x) < 4, h=0; p=1; return; end
-if exist('swtest','file')==2
+if numel(x) < 4, h = 0; p = 1; return; end
+if exist('swtest','file') == 2
     [h,p] = swtest(x,0.05);
-elseif license('test','statistics_toolbox')
-    try
-        [h,p] = lillietest(x);
-    catch
-        dz = (x-mean(x))/std(x);
-        [h,p] = kstest(dz);
-    end
+elseif exist('lillietest','file') == 2
+    [h,p] = lillietest(x);
 else
-    dz = (x-mean(x))/std(x);
-    [h,p] = kstest(dz);
+    x = x(:);
+    n = numel(x);
+    z = (x - mean(x)) ./ std(x);
+    if all(~isfinite(z)), h = 0; p = 1; return; end
+    sk = mean(z.^3,'omitnan');
+    ku = mean(z.^4,'omitnan');
+    jb = n/6 * (sk.^2 + (ku - 3).^2/4);
+    p = 1 - chi2cdf_local(jb, 2);
+    h = p < 0.05;
 end
 end
 
@@ -1077,12 +1112,32 @@ x = sort(x(~isnan(x)));
 n = numel(x);
 if n < 4, text(ax,0.5,0.5,'n < 4','Units','normalized','HorizontalAlignment','center'); return; end
 p_vals = ((1:n) - 0.5) / n;
-q_theor = norminv(p_vals, mean(x), std(x));
+q_theor = mean(x) + std(x) .* sqrt(2) .* erfinv(2*p_vals - 1);
 scatter(ax, q_theor, x, 8, [0.4 0.6 0.8], 'filled', 'MarkerFaceAlpha', 0.4);
 q_rng = [min(q_theor) max(q_theor)];
 plot(ax, q_rng, q_rng, 'r-', 'LineWidth', 1.5);
 xlabel(ax, 'Theoretical quantiles'); ylabel(ax, 'Sample quantiles');
 axis(ax,'square');
+end
+
+
+function p = chi2cdf_local(x, k)
+% Minimal chi-square CDF helper using gammainc, available in base MATLAB.
+p = gammainc(x/2, k/2, 'lower');
+end
+
+
+function q = quantile_omitnan_local(x, p)
+x = sort(x(~isnan(x)));
+if isempty(x), q = NaN; return; end
+if numel(x) == 1, q = x; return; end
+idx = 1 + (numel(x)-1) * p;
+lo = floor(idx); hi = ceil(idx);
+if lo == hi
+    q = x(lo);
+else
+    q = x(lo) + (idx-lo) * (x(hi)-x(lo));
+end
 end
 
 
