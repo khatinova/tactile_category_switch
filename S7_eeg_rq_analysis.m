@@ -36,12 +36,7 @@
 % -----------------------------------------------------------------------------
 addpath(genpath(fileparts(mfilename('fullpath'))));   % pipeline utils on path
 
-remote = 0;
-if remote == 1
-    base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch';
-else
-    base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
-end
+base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
 saved_tables_folder    = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Outcome_feature_tables_v4_merged');
 figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Figures', 'RQ_analysis_combined_extended_electrodes');
 

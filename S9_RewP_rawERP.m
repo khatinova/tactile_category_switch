@@ -45,12 +45,7 @@ clear; close all;
 WINDOW_MODE = 'broad';
 
 %% ── PATHS ───────────────────────────────────────────────────────────────────
-remote = 0;
-if remote
-    base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch';
-else
-    base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
-end
+base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
 
 kh_results = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis');
 feat_dir   = fullfile(kh_results, 'Outcome_feature_tables_v4_merged');

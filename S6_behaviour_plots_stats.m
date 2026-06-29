@@ -70,12 +70,7 @@ TRANS_COLORS = {[0.12 0.47 0.71],[0.85 0.33 0.10],[0.47 0.67 0.19],[0.80 0.20 0.
 
 
 %% ─── PATHS ─────────────────────────────────────────────────────────────────
-remote = 0;
-switch remote
-    case 1, base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch/Salient mod switch KH';
-    case 0, base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
-    case 2, base_path = 'Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
-end
+base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
 outpath = fullfile(base_path,'Results','Behav results', ...
     sprintf('S6_Stage_Sequential_Figures_%02dtrial_%s',STAGE_WIN,STAGE_ASSIGNMENT_POLICY));
 if ~exist(outpath,'dir'), mkdir(outpath); end

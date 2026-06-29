@@ -73,12 +73,7 @@ CLR_KH   = [0.15 0.45 0.70];
 CLR_RR   = [0.65 0.25 0.65];
 
 % ── PATHS ────────────────────────────────────────────────────────────────────
-remote = 0;
-if remote
-    base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch';
-else
-    base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
-end
+base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
 
 feat_dir = fullfile(base_path,'Salient mod switch KH','Results','EEG analysis', ...
     'Outcome_feature_tables_v4_merged');

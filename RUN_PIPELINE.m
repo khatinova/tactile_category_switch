@@ -35,28 +35,12 @@
 %       It is not run directly from here.
 % =============================================================================
 
-%% ── 0. SHARED CONFIGURATION ─────────────────────────────────────────────────
-% PATH CONFIGURATION
-% ------------------
-% Each S-script manages its own data paths via a local  remote = 0 / 1  variable
-% near the top of the file.  To switch between the Windows UNC path (remote=0),
-% the Mac/Linux mount (remote=1), or the Z: drive (remote=2), open the relevant
-% S-script and change the  remote  line there.
-%
-% The BASE_PATH below is reproduced here for logging/display only — it does
-% NOT automatically propagate to the sub-scripts.  Keep it in sync with the
-% remote=0 path in the individual scripts so the console output stays correct.
+%% ── 0. CONFIGURATION ────────────────────────────────────────────────────────
+% Set base_path to your local project root. This value is printed to the
+% console at startup and passed to each sub-script via the shared workspace.
+% Each S-script also defines base_path near its own top — keep them in sync.
 
-REMOTE = 0;   % 0 = Windows UNC, 1 = Mac/Linux mount — ALSO update remote= in each S-script
-
-switch REMOTE
-    case 1
-        BASE_PATH = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/' ...
-                    'Salient_Modality_Switch/Salient mod switch KH';
-    case 0
-        BASE_PATH = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\' ...
-                    'Salient_Modality_Switch\Salient mod switch KH';
-end
+base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
 
 % Add pipeline utilities (subject-ID helpers, figure style, etc.)
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));
@@ -64,7 +48,7 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));
 fprintf('\n');
 fprintf('================================================================\n');
 fprintf('  TACTILE CATEGORY-SWITCH — ANALYSIS PIPELINE  (S5 → S9)\n');
-fprintf('  Base path : %s\n', BASE_PATH);
+fprintf('  Base path : %s\n', base_path);
 fprintf('  Started   : %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
 fprintf('================================================================\n\n');
 

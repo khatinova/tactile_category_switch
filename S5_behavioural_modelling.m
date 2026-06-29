@@ -29,13 +29,7 @@ addpath(genpath(fileparts(mfilename('fullpath'))));
 % =========================================================================
 %% §1  SETUP & PATHS
 % =========================================================================
-remote = 0;
-switch remote
-    case 1
-        base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch/Salient mod switch KH';
-    case 0
-        base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
-end
+base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
 
 outpath   = fullfile(base_path, 'Results', 'Simulation results', 'Figures');
 data_path = fullfile(base_path, 'Data');

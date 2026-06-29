@@ -24,24 +24,11 @@ clearvars; close all;
 addpath(genpath(fileparts(mfilename('fullpath'))));
 
 %% --- Configure paths (edit to match your environment) ---
-remote =0;
-if remote == 1
-    base_KH = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch/Salient mod switch KH/Data';
-    base_RR = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch/Salient mod switch RR/Data';
-    func_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch/Functions';
-    base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch/Salient mod switch KH'
-elseif remote ==0
-    base_KH = '\\Humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH\Data';
-    base_RR = '\\Humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch RR\Data';
-    func_path = '\\Humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Functions';
-    base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
-    fig_outpath = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH\Results\Behav results\Figures';
-elseif remote == 2
-    base_KH = 'Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH\Data';
-    base_RR = 'Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch RR\Data';
-    func_path = 'Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Functions';
-    base_path = 'Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
-end
+base_path   = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
+base_KH     = '\\Humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH\Data';
+base_RR     = '\\Humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch RR\Data';
+func_path   = '\\Humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Functions';
+fig_outpath = fullfile(base_path, 'Results', 'Behav results', 'Figures');
 
 % Output save flag
 save_per_subject = true;   % if true, writes trial_data_aligned.mat in each subject folder
