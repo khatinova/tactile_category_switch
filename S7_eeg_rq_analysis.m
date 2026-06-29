@@ -64,11 +64,15 @@ figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', '
 % PLOT_SCALE='z' for compact model-aligned supplementary figures.
 PLOT_SCALE = 'norm';      % options: 'z', 'norm', 'raw'
 
-figure_output_folder = fullfile(figure_output_folder, ['S7d_no_lines_plot_' PLOT_SCALE]);
+figure_output_folder = fullfile(figure_output_folder, ['S7_plot_' PLOT_SCALE]);
 if ~exist(figure_output_folder, 'dir'), mkdir(figure_output_folder); end
 
 % Load the combined KH+RR feature table (from S4) unless already in workspace.
-% load(fullfile(saved_tables_folder, 'group_feature_table_combined.mat'), 'group_table');
+% (S7b calls clear at the top, so group_table will not persist from S7b's run.
+%  This guard loads the file only when the variable is absent.)
+if ~exist('group_table', 'var')
+    load(fullfile(saved_tables_folder, 'group_feature_table_combined.mat'), 'group_table');
+end
 
 
 % Figure styling defaults (ticks outside, no top/right box) applied to every

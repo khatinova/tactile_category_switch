@@ -13,8 +13,6 @@
 %   PLOT_SEQUENTIAL        — (boolean) run E1–E11 sequential-block figures
 %                            (requires all_trial_data.mat)
 %
-% PIPELINE STEP 6 — behavioural stage + sequential-block figures/statistics.
-%
 % CHANGES v2:
 %   - Individual subject points are now CONNECTED (spaghetti lines) across
 %     stages in all 4-stage panels, and paired between conditions (D vs P,
@@ -79,7 +77,7 @@ switch remote
     case 2, base_path = 'Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
 end
 outpath = fullfile(base_path,'Results','Behav results', ...
-    sprintf('S6c_Stage_Sequential_Figures_%02dtrial_%s',STAGE_WIN,STAGE_ASSIGNMENT_POLICY));
+    sprintf('S6_Stage_Sequential_Figures_%02dtrial_%s',STAGE_WIN,STAGE_ASSIGNMENT_POLICY));
 if ~exist(outpath,'dir'), mkdir(outpath); end
 cd(base_path)
 fprintf('S6 stage window: %d trials | assignment policy: %s\n',STAGE_WIN,STAGE_ASSIGNMENT_POLICY);

@@ -36,9 +36,18 @@
 % =============================================================================
 
 %% ── 0. SHARED CONFIGURATION ─────────────────────────────────────────────────
-% Set REMOTE = 1 for Mac/Linux network drive; REMOTE = 0 for Windows UNC path.
+% PATH CONFIGURATION
+% ------------------
+% Each S-script manages its own data paths via a local  remote = 0 / 1  variable
+% near the top of the file.  To switch between the Windows UNC path (remote=0),
+% the Mac/Linux mount (remote=1), or the Z: drive (remote=2), open the relevant
+% S-script and change the  remote  line there.
+%
+% The BASE_PATH below is reproduced here for logging/display only — it does
+% NOT automatically propagate to the sub-scripts.  Keep it in sync with the
+% remote=0 path in the individual scripts so the console output stays correct.
 
-REMOTE = 0;
+REMOTE = 0;   % 0 = Windows UNC, 1 = Mac/Linux mount — ALSO update remote= in each S-script
 
 switch REMOTE
     case 1
@@ -133,7 +142,7 @@ fprintf('S7b complete.\n\n');
 %
 %  INPUT  : group_feature_table_combined.mat  (from S4)
 %           frn_rewp_by_stage_combined.mat     (optional; for grand-avg waveforms)
-%  OUTPUT : <Figures>/RQ_analysis_combined_extended_electrodes/S7d_no_lines_plot_<SCALE>/
+%  OUTPUT : <Figures>/RQ_analysis_combined_extended_electrodes/S7_plot_<SCALE>/
 %           manuscript_stats.txt
 
 fprintf('─── S7: EEG RQ analysis (RQ1–RQ5) ─────────────────────────────\n');
