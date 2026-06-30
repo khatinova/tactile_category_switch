@@ -284,7 +284,34 @@ for participant = valid_participants
     end
 
     % ------------------------------------------------------------------
-    % STEP 2: EXTRACT PER-TRIAL FEATURES AND ACCUMULATE GRAND AVERAGES
+    % STEP 1b: SINGLE-TRIAL ERSP POWER FEATURES FOR EVERY EPOCH
+    %
+    % theta/alpha/beta ERSP are per-trial quantities: a trial's band power
+    % does not depend on how many other trials share its condition cell.
+    % They are therefore computed here for ALL epochs and are deliberately
+    % NOT gated by MIN_TRIALS (that gate only governs the grand-average TF
+    % maps and the cell-level ITPC below, which need enough trials to be
+    % stable). Decoupling means sparse cells — e.g. the few incorrect trials
+    % in deterministic blocks — still contribute, which is exactly what the
+    % downstream difference figure / LME n depends on.
+    %
+    % Single-trial ERSP uses the subject-level mean baseline (Cohen 2014,
+    % Ch.18) so trial-wise variance is preserved.
+    % ------------------------------------------------------------------
+    if ~isempty(tf_power_fcz)
+        bl_mean_subj = mean(mean(tf_power_fcz(:,bl_mask,:), 2, 'omitnan'), 3, 'omitnan'); % N_FREQS x 1
+        for ep = 1:n_epochs
+            rows_ep = find(subj_rows & group_table.epoch == ep);
+            if isempty(rows_ep), continue; end
+            trial_ersp = 10 * log10(double(tf_power_fcz(:,:,ep)) ./ bl_mean_subj);
+            group_table.theta_ersp(rows_ep) = mean(trial_ersp(theta_band, frn_mask),  'all', 'omitnan');
+            group_table.alpha_ersp(rows_ep) = mean(trial_ersp(alpha_band, p300_mask), 'all', 'omitnan');
+            group_table.beta_ersp(rows_ep)  = mean(trial_ersp(beta_band,  beta_mask), 'all', 'omitnan');
+        end
+    end
+
+    % ------------------------------------------------------------------
+    % STEP 2: ACCUMULATE GRAND AVERAGES + CELL-LEVEL ITPC
     % ------------------------------------------------------------------
     has_P = any(group_table.block_type(subj_rows) == 'P');
 
@@ -335,35 +362,16 @@ for participant = valid_participants
                     grand_tf.FCz.(stage_names{s_i}).(bt).(oc_str).itpc(end+1,:,:) = itpc;
                     grand_tf.FCz.(stage_names{s_i}).(bt).(oc_str).subj(end+1)     = participant;
 
-                    %% --- Single-trial features ---
-                    %
-                    % For each trial, compute mean ERSP in band x window.
-                    % Single-trial ERSP uses per-trial power divided by the
-                    % MEAN baseline (not per-trial baseline) to preserve
-                    % trial-wise variance (Cohen 2014, Ch.18).
-                    %
-                    bl_mean = mean(mean(tf_power_fcz(:,bl_mask,:), 2, 'omitnan'), 3, 'omitnan');
-                    % bl_mean: N_FREQS x 1 (grand baseline across all epochs for this subject)
-
-                    row_indices = find(cond_mask_gt);
-                    for ri = 1:numel(row_indices)
-                        r  = row_indices(ri);
-                        ep = group_table.epoch(r);
-                        if isnan(ep) || ep < 1 || ep > n_epochs; continue; end
-
-                        trial_power = tf_power_fcz(:,:,ep);
-                        % trial ERSP in dB using subject-level baseline
-                        trial_ersp = 10 * log10(trial_power ./ bl_mean);
-
-                        group_table.theta_ersp(r) = mean( ...
-                            trial_ersp(theta_band, frn_mask), 'all', 'omitnan');
-                        group_table.alpha_ersp(r) = mean( ...
-                            trial_ersp(alpha_band, p300_mask), 'all', 'omitnan');
-                        group_table.beta_ersp(r)  = mean( ...
-                            trial_ersp(beta_band,  beta_mask), 'all', 'omitnan');
-                        group_table.theta_itpc(r) = mean( ...
-                            itpc(theta_band, frn_mask), 'all', 'omitnan');
-                    end
+                    %% --- Cell-level ITPC feature ---
+                    % ITPC is computed ACROSS the trials of this cell, so it
+                    % is genuinely a cell-level (not single-trial) measure and
+                    % stays gated by MIN_TRIALS. Every trial in the cell is
+                    % tagged with the cell's theta ITPC. (The per-trial ERSP
+                    % power features were computed once per epoch in STEP 1b,
+                    % decoupled from this gate.)
+                    itpc_rows = find(cond_mask_gt & ~isnan(group_table.epoch) & ...
+                        group_table.epoch >= 1 & group_table.epoch <= n_epochs);
+                    group_table.theta_itpc(itpc_rows) = mean(itpc(theta_band, frn_mask), 'all', 'omitnan');
 
                 end % ~isempty fcz
             end % outcome loop
@@ -741,6 +749,10 @@ close(fig_summary);
 % =========================================================================
 fprintf('\nPlotting theta-power difference figure...\n');
 
+% Minimum trials per subject per cell to contribute a (stable) subject mean.
+% Lower this toward 1 to maximise n at the cost of noisier subject means.
+MIN_TRIALS_DIFF = 5;
+
 subjs = unique(group_table.subj_id);
 nS    = numel(subjs);
 [thD_c, thD_i, thP_c, thP_i] = deal(nan(nS,1));
@@ -748,11 +760,21 @@ nS    = numel(subjs);
 for si = 1:nS
     sm = group_table.subj_id == subjs(si) & ...
          ~group_table.false_fb & ~isnan(group_table.theta_ersp);
-    thD_c(si) = mean(group_table.theta_ersp(sm & group_table.block_type=='D' & group_table.correct==1), 'omitnan');
-    thD_i(si) = mean(group_table.theta_ersp(sm & group_table.block_type=='D' & group_table.correct==0), 'omitnan');
-    thP_c(si) = mean(group_table.theta_ersp(sm & group_table.block_type=='P' & group_table.correct==1), 'omitnan');
-    thP_i(si) = mean(group_table.theta_ersp(sm & group_table.block_type=='P' & group_table.correct==0), 'omitnan');
+    thD_c(si) = mean_if_enough(group_table.theta_ersp(sm & group_table.block_type=='D' & group_table.correct==1), MIN_TRIALS_DIFF);
+    thD_i(si) = mean_if_enough(group_table.theta_ersp(sm & group_table.block_type=='D' & group_table.correct==0), MIN_TRIALS_DIFF);
+    thP_c(si) = mean_if_enough(group_table.theta_ersp(sm & group_table.block_type=='P' & group_table.correct==1), MIN_TRIALS_DIFF);
+    thP_i(si) = mean_if_enough(group_table.theta_ersp(sm & group_table.block_type=='P' & group_table.correct==0), MIN_TRIALS_DIFF);
 end
+
+% Transparency: report how many subjects contribute (and why this can be
+% fewer than the number of EEG datasets available).
+fprintf('  Difference-figure n (subjects with >= %d true-FB trials in the cell):\n', MIN_TRIALS_DIFF);
+fprintf('    D: Correct=%d, Incorrect=%d | P: Correct=%d, Incorrect=%d\n', ...
+    sum(~isnan(thD_c)), sum(~isnan(thD_i)), sum(~isnan(thP_c)), sum(~isnan(thP_i)));
+fprintf('    NOTE: wavelet loop processed %d KH participants (valid_participants);\n', numel(valid_participants));
+fprintf('          combined table has %d subjects. Each contrast is PAIRED, so n is\n', nS);
+fprintf('          the subjects with data in BOTH of its conditions; sparse incorrect\n');
+fprintf('          cells (esp. deterministic blocks) are the main limiter.\n');
 
 CLR_COR = [0.10 0.60 0.10];   % correct (green)
 CLR_INC = [0.70 0.10 0.10];   % incorrect (red)
@@ -783,6 +805,14 @@ ax4 = subplot(2,2,4);
 paired_theta_panel(ax4, thP_i, thD_i, 'P','D', CLR_P, CLR_D, ...
     'Incorrect trials: D − P');
 
+annotation(fig_thdiff,'textbox',[0.01 0.005 0.98 0.05],'String', ...
+    sprintf(['n = subjects with >= %d true-feedback trials in BOTH conditions of the contrast ' ...
+    '(per-subject means, collapsed across stages). The wavelet loop processed %d KH datasets; ' ...
+    'paired incorrect-trial cells (especially in deterministic blocks) are the main reason n is ' ...
+    'smaller than the total number of datasets. Significance bar: * p<.05, ** p<.01, *** p<.001 (paired t-test).'], ...
+    MIN_TRIALS_DIFF, numel(valid_participants)), ...
+    'FontSize',7,'EdgeColor','none','BackgroundColor',[0.95 0.95 0.95]);
+
 saveas(fig_thdiff, fullfile(figure_output_folder,'S10_TF_theta_difference.pdf'));
 fprintf('Saved S10_TF_theta_difference.pdf\n');
 
@@ -798,14 +828,19 @@ function paired_theta_panel(ax, va, vb, lbl_a, lbl_b, clr_a, clr_b, ttl)
 %PAIRED_THETA_PANEL  Two-condition paired comparison of theta ERSP.
 %   Left bar  = va (lbl_a); right bar = vb (lbl_b).
 %   Delta and the paired t-test are reported as (vb - va), matching the
-%   "<lbl_b> - <lbl_a>" convention used in the panel title.
+%   "<lbl_b> - <lbl_a>" convention used in the panel title. A significance
+%   bracket (* p<.05, ** p<.01, *** p<.001) is drawn when the paired
+%   difference is significant.
 ok = ~isnan(va) & ~isnan(vb);
 va = va(ok);  vb = vb(ok);
 n  = numel(va);
 hold(ax,'on');
 
-bar(ax, 1, mean(va), 0.6, 'FaceColor', clr_a, 'FaceAlpha', 0.65, 'EdgeColor','none');
-bar(ax, 2, mean(vb), 0.6, 'FaceColor', clr_b, 'FaceAlpha', 0.65, 'EdgeColor','none');
+mA = mean(va);  seA = std(va,'omitnan')/sqrt(max(n,1));
+mB = mean(vb);  seB = std(vb,'omitnan')/sqrt(max(n,1));
+
+bar(ax, 1, mA, 0.6, 'FaceColor', clr_a, 'FaceAlpha', 0.65, 'EdgeColor','none');
+bar(ax, 2, mB, 0.6, 'FaceColor', clr_b, 'FaceAlpha', 0.65, 'EdgeColor','none');
 
 % Within-subject connecting lines
 for i = 1:n
@@ -816,8 +851,7 @@ end
 scatter(ax, ones(n,1),   va, 20, clr_a, 'filled', 'MarkerFaceAlpha', 0.55, 'HandleVisibility','off');
 scatter(ax, 2*ones(n,1), vb, 20, clr_b, 'filled', 'MarkerFaceAlpha', 0.55, 'HandleVisibility','off');
 
-errorbar(ax, [1 2], [mean(va) mean(vb)], ...
-    [std(va,'omitnan')/sqrt(max(n,1)), std(vb,'omitnan')/sqrt(max(n,1))], ...
+errorbar(ax, [1 2], [mA mB], [seA seB], ...
     'k.', 'LineWidth', 1.3, 'CapSize', 7, 'HandleVisibility','off');
 
 yline(ax, 0, 'k:', 'HandleVisibility','off');
@@ -826,19 +860,47 @@ xlim(ax, [0.4 2.6]);
 ylabel(ax, 'Theta ERSP (dB)');
 title(ax, sprintf('%s  (n=%d)', ttl, n), 'FontSize', 9);
 
-if n >= 2
-    d_mean        = mean(vb - va, 'omitnan');
-    [~, p, ~, st] = ttest(vb, va);
-    if     p < 0.001, star = '***';
-    elseif p < 0.01,  star = '**';
-    elseif p < 0.05,  star = '*';
-    else,             star = 'ns';
-    end
-    yl = ylim(ax);
-    text(ax, 1.5, yl(2), ...
-        sprintf('\\Delta = %.2f dB  %s\nt(%d) = %.2f, p = %.3f', ...
-                d_mean, star, st.df, st.tstat, p), ...
-        'HorizontalAlignment','center','VerticalAlignment','top','FontSize',8);
+if n < 2, return; end
+
+d_mean        = mean(vb - va, 'omitnan');
+[~, p, ~, st] = ttest(vb, va);
+if     p < 0.001, star = '***';
+elseif p < 0.01,  star = '**';
+elseif p < 0.05,  star = '*';
+else,             star = 'ns';
+end
+
+% y-extent of all plotted data, with headroom for the significance bracket
+y_hi = max([va; vb; mA+seA; mB+seB]);
+y_lo = min([va; vb; mA-seA; mB-seB; 0]);
+rng  = max(y_hi - y_lo, eps);
+ylim(ax, [y_lo - 0.08*rng, y_hi + 0.30*rng]);
+
+% Significance bracket (only when significant)
+if p < 0.05
+    yb   = y_hi + 0.12*rng;
+    tick = 0.04*rng;
+    line(ax, [1 1 2 2], [yb-tick yb yb yb-tick], ...
+        'Color','k', 'LineWidth',1.2, 'HandleVisibility','off');
+    text(ax, 1.5, yb + 0.01*rng, star, ...
+        'HorizontalAlignment','center', 'VerticalAlignment','bottom', ...
+        'FontSize',13, 'FontWeight','bold');
+end
+
+% Stats line under the title
+subtitle(ax, sprintf('\\Delta = %.2f dB,  t(%d) = %.2f, p = %.3f %s', ...
+    d_mean, st.df, st.tstat, p, star), 'FontSize',8, 'Color',[0.3 0.3 0.3]);
+end
+
+
+% --------------------------------------------------------------------------
+function m = mean_if_enough(v, min_n)
+%MEAN_IF_ENOUGH  Mean of v (NaNs ignored), or NaN if fewer than min_n values.
+v = v(~isnan(v));
+if numel(v) >= min_n
+    m = mean(v);
+else
+    m = NaN;
 end
 end
 
