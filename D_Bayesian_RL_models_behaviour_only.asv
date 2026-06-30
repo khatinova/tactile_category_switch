@@ -1,30 +1,52 @@
 % ==========================================================================
-% S5_behavioural_modelling.m  (was: D_Bayesian_RL_models_behaviour_only.m)
+% BAYESIAN DELTA-RULE SIMULATION & FITTING — v2
+% Category Switch Braille Go/NoGo Task
 %
-% PIPELINE STEP 5 of 7 — behavioural computational modelling.
-%
-% MODELS (compared via BIC/AIC on matched trial-level likelihoods)
+% MODELS
 % ──────
-%   Nassar (2010)   — adaptive learning rate via change-point probability ω.
-%                     Fitted: H (hazard), β (softmax). [this file]
-%   Rescorla-Wagner — (a) single-α (BIC baseline, this file)
-%                     (b) DUAL learning rate α_pos / α_neg  [S5b module]
-%   HGF             — 3-level binary Hierarchical Gaussian Filter  [S5b module]
+%   Nassar (2010)  — adaptive learning rate via change-point probability ω.
+%                    Fitted parameters: H (hazard rate), β (softmax temperature).
+%   Rescorla-Wagner — subject-wise RW with separate α_det / α_prob, plus a
+%                    confidence-weighted pre/post-reversal variant.
+%                    Implemented via fit_RW_subjectwise (see bottom of file).
 %
-% The dual-α RW and the HGF are implemented in the companion module
-% S5b_models_RW_HGF.m, which loads all_trial_data + nassar_results.mat and runs
-% a 3-way model comparison (Nassar vs RW-dual vs HGF) with parameter recovery
-% and posterior predictive checks. Run S5 first, then S5b.
+% STRUCTURE
+% ─────────
+%   §1  Setup & paths
+%   §2  Simulation settings + stimulus structure
+%   §3  Nassar simulation loop
+%   §4  Simulation figures (beliefs, accuracy, learning rate)
+%   §5  Fit Nassar to real data (all blocks combined)
+%   §6  Fit Nassar separately for D and P blocks
+%   §7  Visualise fitted parameters
+%   §8  Parameter recovery (fitted → simulate → refit)
+%   §9  Model comparison: Nassar BIC vs RW BIC
+%   §10 Posterior predictive checks (Nassar only)
+%   §11 Add Nassar latents + switch_stims to group_T
 %
-% This script: simulate + fit Nassar, fit subject-wise RW, parameter recovery,
-% PPC, model comparison (Nassar vs single-α RW), and write Nassar latents to
-% the behaviour table.
+% KEY DESIGN NOTES
+% ─────────────────
+%   DIMENSIONAL SHIFT: 2/4 stimuli switch Go/NoGo at reversal; 2 maintained.
+%   Only switched stimuli generate a change-point signal post-reversal.
+%
+%   PER-STIMULUS CP DETECTION: ω is computed independently per stimulus.
+%   No cross-stimulus propagation.
+%
+%   PARTICIPANTS UNAWARE OF PROBABILISTIC FEEDBACK: y_t is derived from the
+%   feedback shown on screen (perceivedCorrect), not ground truth.
+%   H_prob − H_det therefore indexes noise-induced apparent volatility.
+%
+%   PROSPECTIVE CERTAINTY |θ−0.5| is the correct confidence predictor
+%   (computed before feedback, matching the trial order: stimulus → response
+%   → confidence rating → feedback).
+%
+% Behaviour-only version: does not load EEG feature tables.
+% This script fits/simulates the behavioural RL model, saves Nassar results,
+% and optionally writes a behaviour-only group_T table enriched with Nassar
+% latents via (subjID, block, trial) key.
 % ==========================================================================
 
 clear; close all; rng(42);
-
-% Put pipeline utils on the path (subject-id helper, figure style)
-addpath(genpath(fileparts(mfilename('fullpath'))));
 
 % =========================================================================
 %% §1  SETUP & PATHS
@@ -137,12 +159,7 @@ BLOCK_ORDER_SET = {
 % Feedback fidelity by block type
 P_TRUE_FB_D = 1.0;
 P_TRUE_FB_P = 0.8;
-
-% Default per-block feedback fidelity used by the simulators when a block-order
-% string is not otherwise resolved. simulate_one_subject indexes P_TRUE_FB(b)
-% (falling back to 1.0), so a representative probabilistic value is used here.
-% (Previously this line referenced an undefined variable `P_TRUE_FB`.)
-P_TRUE_FB = P_TRUE_FB_P;
+BLOCK_IS_DET = P_TRUE_FB >= 0.99;
 
 SOFTMAX_BETA   = 6;
 CONF_SCALE_MAX = 10;

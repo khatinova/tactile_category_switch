@@ -1,36 +1,38 @@
 % =============================================================================
-% S2_RR_preprocess_epoch_eeg.m  (RR-locked twin of S2_preprocess_epoch_eeg.m)
+% S2_preprocess_epoch_eeg.m  (was: A_B_Preprocessing_KH.m)
 %
-% PIPELINE STEP 2 of 7 (RR COHORT) — preprocessing + epoching for the RR data.
-%
-% This is a FAITHFUL PARALLEL of the KH S2 script. Every preprocessing step,
-% epoching step, feature-extraction step and local function is identical to
-% S2_preprocess_epoch_eeg.m. The ONLY differences are the RR-specific settings,
-% all of which flow from COHORT = 'RR' (see the COHORT SELECTION block):
-%   * Import         : EGI/.mff via pop_mffimport  (KH used Curry/.dat).
-%   * Channels       : E11 (FCz), E7 (Cz), parietal E62/E67/E72,
-%                      ACC E11/E6/E16, somatosensory E36/E104/E41/E103.
-%   * Reference      : Cz (E7) then common average  (KH used average ref).
-%   * Outcome codes  : RR EGI event strings (see PART 1, step 11).
-%   * No LM/RM mastoid regression (RR EGI net has no mastoid channels).
-%   * Participants   : RR_VALID_FULL  (see USER SWITCHES).
-%   * Behaviour spine: researcher == 'RR' rows; subject prefix 'Nc'.
+% PIPELINE STEP 2 of 7 — the ONE TRUE preprocessing + epoching script.
 %
 % PURPOSE
 % -------
-%   1. Load raw RR EEG (EGI/.mff).
+%   1. Load raw EEG (KH: Curry/.dat;  RR: EGI/.mff  -- see COHORT switch).
 %   2. Preprocess: harmonising 0-30 Hz low-pass, 0.5-40 Hz band-pass,
-%      alignment-preserving burst interpolation, ASR channel cleaning,
-%      Cz-then-average reference, ICA + ICLabel auto-reject.
+%      mastoid motion regression, alignment-preserving burst interpolation,
+%      ASR channel cleaning, average reference, ICA + ICLabel auto-reject.
 %   3. Export OUTCOME broadband, theta-amplitude, and theta-phase epochs.
 %   4. Build trial2epoch alignment (external KH_align_epochs_with_offset) and
 %      per-epoch bad-epoch FLAGGING; trim practice/misaligned trials.
-%   5. Build the per-trial spine feature table (E11 neg-peak/mean, P300, theta,
+%   5. Build the per-trial spine feature table (FCz neg-peak/mean, P300, theta,
 %      PLV). FRN/RewP are NOT per-trial -- they are difference waves built per
-%      stage (see note in PART 2 and pipeline/utils/kh_compute_frn_rewp_by_stage.m).
+%      stage in S3 (see note in PART 2 and pipeline/utils/kh_compute_frn_rewp_by_stage.m).
 %
-% Outputs are written to the RR results tree and tagged "RR", so they sit
-% alongside (and never overwrite) the KH outputs. Merge with S4 afterwards.
+% COHORTS
+% -------
+%   Set COHORT = 'KH' or 'RR'. KH preprocessing is already complete; rerun this
+%   with COHORT = 'RR' to process the RR (EGI) data with the same bad-epoch
+%   flagging and 0-30 Hz harmonising filter that KH received. RR channel labels
+%   and event codes are configured in the COHORT block below.
+%
+% CHANGES vs original A_B_Preprocessing_KH.m
+% ------------------------------------------
+%   * Local KH_align_epochs_with_offset DELETED (used the better external copy
+%     on func_path; same I/O signature).
+%   * Generalised to RR (COHORT switch: import, channel labels, event codes,
+%     reference; bad-epoch flagging + 0-30 Hz filter now applied to RR too).
+%   * Per-trial table carries only single-trial frontocentral measures
+%     (FCz negative-peak + FCz/Cz mean); FRN/RewP moved to the per-stage table.
+%   * Subject naming unified to subj_id ("Ox03"/"Nc07") / subj / cohort.
+%
 % =============================================================================
 
 clear; close all; clc;
@@ -42,17 +44,17 @@ addpath(genpath(fileparts(mfilename('fullpath'))));
 %% COHORT SELECTION
 % -------------------------------------------------------------------------
 % 'KH' = Curry/Neuroscan+ANT (already preprocessed);  'RR' = EGI/MFF (to run).
-% This is the RR-locked twin script, so COHORT is fixed to 'RR'.
-COHORT = 'RR';
+COHORT = 'KH';
 
 switch upper(COHORT)
     case 'KH'
         cohort_import     = 'curry';      % loadcurry
         cohort_ref_mode   = 'average';    % average reference, protect EOG/mastoid
         fcz_label    = 'FCz';   cz_label = 'Cz';
+        prefrontal_channels = {'FCz','Cz','Fz','FC1','FC2'};
         par_channels = {'Pz','P1','P2'};
         acc_channels = {'FCz','Fz','AFz','F1','F2'};
-        som_channels = {'C3','C4','CP3','CP1','C5','CP5'};
+        som_channels = {'C1', 'C5'}; % {'C3','C4','CP3','CP1','C5','CP5'};
     case 'RR'
         cohort_import     = 'mff';        % pop_mffimport
         cohort_ref_mode   = 'Cz_then_CAR';% Cz (ch 61) then common average ref
@@ -63,26 +65,27 @@ switch upper(COHORT)
     otherwise
         error('Unknown COHORT "%s" (use ''KH'' or ''RR'').', COHORT);
 end
-% NOTE: RR raw import is wired in PART 1 (pop_mffimport on the discovered .mff,
-% then GSN-HydroCel-128 channel locations). The reference (Cz then common
-% average), the 0-30 Hz harmonising filter, and per-epoch bad-epoch flagging
-% are all applied as in KH. cohort_import/cohort_ref_mode below drive this.
+% NOTE: RR raw import / reference handling is wired in PART 1 under
+% `if strcmpi(cohort_import,'mff')`. The 0-30 Hz harmonising filter and
+% per-epoch bad-epoch flagging are applied to BOTH cohorts.
 
 % -------------------------------------------------------------------------
 %% USER SWITCHES
 % -------------------------------------------------------------------------
 
-RUN_PREPROCESSING       = true;
-RUN_ICA                 = true;
+RUN_PREPROCESSING       = false;
 RUN_FEATURE_EXTRACTION  = true;
 
-% RR subjects are AUTO-DISCOVERED by scanning the four condition subfolders
-% (see PATHS + discover_rr_subjects). You do NOT need to list them by number.
-%   RUN_ALL_VALID_RR = true  -> process every Nc## subject that is found.
-%   RUN_ALL_VALID_RR = false -> process only the Nc numbers in RR_PILOT_ONLY
-%                               (handy for a quick test on one or two subjects).
-RUN_ALL_VALID_RR = true;
-RR_PILOT_ONLY    = [1, 2];   % <-- numbers (Nc01, Nc02 ...) used only when RUN_ALL_VALID_RR=false
+RUN_ALL_VALID_KH = true;
+
+KH_VALID_FULL =  [3:12, 14:23, 27,28];
+KH_PILOT_ONLY = [12, 14];
+
+if RUN_ALL_VALID_KH
+    valid_participants = KH_VALID_FULL;
+else
+    valid_participants = KH_PILOT_ONLY;
+end
 
 save_tables  = true;
 save_figures = true;
@@ -101,25 +104,6 @@ end
 
 eeglab_path = 'C:\Users\khatinova\OneDrive - Nexus365\Pre_2026_Folders\Documents\MATLAB\eeglab2025.1.0';
 
-% -------------------------------------------------------------------------
-% RR raw-data layout.
-% The RR Data tree is split into FOUR task-condition subfolders. Each of the
-% 15 Nc subjects lives in exactly ONE of these, in a folder named like
-% "Nc01_p1_DPDP", which in turn contains the EGI recording as a ".mff" folder.
-% We scan all four subfolders, parse the clean "Nc##" label, and locate the
-% single .mff recording inside each subject folder (see PART 1).
-% -------------------------------------------------------------------------
-RR_CONDITION_SUBFOLDERS = { ...
-    'det_or_prob_and_conf', ...
-    'det_to_prob', ...
-    'deterministic', ...
-    'probabilistic'};
-
-% EGI channel-location file (128-channel HydroCel). Adjust if your EEGLAB
-% plugins live elsewhere.
-egi_chanlocs_file = fullfile(eeglab_path, 'plugins', 'dipfit', 'standard_BEM', ...
-    'elec', 'GSN-HydroCel-128.sfp');
-
 % Cohort-aware data + output roots.
 %   KH raw/results live under 'Salient mod switch KH'
 %   RR raw/results live under 'Salient mod switch RR'
@@ -128,8 +112,10 @@ RR_data_path = fullfile(base_path, 'Salient mod switch RR', 'Data');
 
 if strcmpi(COHORT, 'RR')
     cohort_results = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis');
+    behav_data_path = RR_data_path;
 else
     cohort_results = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis');
+    behav_data_path = KH_data_path;
 end
 
 study_filepath  = fullfile(cohort_results, 'Winter 2026');
@@ -148,22 +134,17 @@ addpath(eeglab_path);
 % all_trial_data is built by S1 (behaviour) and is shared across cohorts.
 load(fullfile(KH_data_path, 'all_trial_data_June2026.mat'));
 
-% The behaviour table is a SINGLE combined table (group_T) holding ALL
-% subjects (KH "Ox##" and RR "Nc##"), and it lives in the canonical combined
-% Data folder alongside all_trial_data (the KH Data path). We keep the RR rows
-% by subjID prefix "Nc"; per-subject selection in PART 2 is by exact subjID.
-behav_file = fullfile(KH_data_path, 'behav_table_June2026.mat');
-if exist(behav_file, 'file')
-    S_beh = load(behav_file, 'group_T');
-    RR_behav_table = S_beh.group_T;
+KH_behav_file = fullfile(behav_data_path, 'behav_table_June2026.mat');
+if exist(KH_behav_file, 'file')
+    S_beh = load(KH_behav_file, 'group_T');
+    KH_behav_table = S_beh.group_T;
 else
-    error('behav_table.mat not found at %s', behav_file);
+    error('behav_table.mat not found at %s', KH_behav_file);
 end
 
-% Keep only RR subjects (subjID starts with "Nc").
-RR_behav_table = RR_behav_table(startsWith(string(RR_behav_table.subjID), "Nc"), :);
-fprintf('Behaviour table: %d RR rows across %d RR subjects.\n', ...
-    height(RR_behav_table), numel(unique(string(RR_behav_table.subjID))));
+if ismember('researcher', KH_behav_table.Properties.VariableNames)
+    KH_behav_table = KH_behav_table(strcmp(string(KH_behav_table.researcher), 'KH'), :);
+end
 
 % -------------------------------------------------------------------------
 %% PREPROCESSING PARAMETERS
@@ -207,13 +188,10 @@ BURST_MAX_RUN_MS      = 300;
 EPOCH_PTP_SD_THRESH  = 5;
 EPOCH_GRAD_SD_THRESH = 5;
 
-% Subjects with LM/RM mastoids (KH only; RR EGI net has none).
+% Subjects with LM/RM mastoids.
 LMRM_SUBJECT_IDS = [17:23, 27,28];
 
-% EGI 128-channel HydroCel: peri-ocular / reference channels to protect from
-% scalp cleaning + average reference (E125-E128 are peri-ocular; VREF/Cz is the
-% online vertex reference). Matches the RR preprocessing reference script.
-protect_labels = {'E125','E126','E127','E128','VREF','Cz'};
+protect_labels = {'VEOG','HEOG','EOG','TRIGGER','LM','RM'};
 
 % ICLabel auto-rejection threshold.
 ICLABEL_MIN_BRAIN_PROB = 0.50;
@@ -253,38 +231,31 @@ long_burst_log = table();
 
 if RUN_PREPROCESSING
 
-    % ---------------------------------------------------------------------
-    % Build the RR subject registry by scanning all FOUR condition subfolders.
-    %   <RR_data_path>/<condition>/Nc##_p#_<order>/<recording>.mff
-    % Each of the 15 Nc subjects lives in exactly ONE condition subfolder.
-    % See the discover_rr_subjects() local function for the scan/parse logic.
-    % ---------------------------------------------------------------------
-    rr_subjects = discover_rr_subjects(RR_data_path, RR_CONDITION_SUBFOLDERS);
-
-    fprintf('Found %d RR subjects across %d condition subfolders.\n', ...
-        numel(rr_subjects), numel(RR_CONDITION_SUBFOLDERS));
-
-    % Optional subset for testing: when RUN_ALL_VALID_RR is false, keep only
-    % the Nc numbers listed in RR_PILOT_ONLY.
-    if ~RUN_ALL_VALID_RR && ~isempty(rr_subjects)
-        keep = ismember([rr_subjects.num], RR_PILOT_ONLY);
-        rr_subjects = rr_subjects(keep);
-        fprintf('  RUN_ALL_VALID_RR=false -> processing %d pilot subjects.\n', numel(rr_subjects));
+    % Cohort-aware raw-data location and subject-folder glob.
+    if strcmpi(COHORT, 'RR')
+        raw_data_path = RR_data_path;     % defined in PATHS section
+        subj_glob     = 'Nc*';
+        subj_prefix   = 'Nc';
+    else
+        raw_data_path = KH_data_path;
+        subj_glob     = 'Ox*';
+        subj_prefix   = 'Ox';
     end
 
-    pop_editoptions('option_storedisk', 0);
-    for s_idx = 9:numel(rr_subjects)
+    data_dirs = dir(fullfile(raw_data_path, subj_glob));
+    data_dirs = data_dirs([data_dirs.isdir]);
+    all_subj_names = {data_dirs.name};
 
-        subjID   = rr_subjects(s_idx).nc_label;   % clean 'Nc##' used for all outputs
-        subjPath = rr_subjects(s_idx).subjPath;
-        mff_path = rr_subjects(s_idx).mff_path;
-        i        = rr_subjects(s_idx).num;        % numeric id for hw-filter bookkeeping
-        is_cohort1 = false;   % RR has no cohort-1
-        has_LMRM   = false;   % RR EGI net has no LM/RM mastoids
+    pop_editoptions('option_storedisk', 0);
+
+    for i = valid_participants
+
+        subjID = sprintf('%s%02d', subj_prefix, i);
+        is_cohort1 = strcmpi(COHORT,'KH') && i <= 8;   % cohort-1 only exists in KH
+        has_LMRM = strcmpi(COHORT,'KH') && ismember(i, LMRM_SUBJECT_IDS);
 
         fprintf('\n======================================================\n');
-        fprintf('PREPROCESSING %s  [RR | %s | %s]\n', subjID, ...
-            rr_subjects(s_idx).condition, rr_subjects(s_idx).folder);
+        fprintf('PREPROCESSING %s  [cohort %s]\n', subjID, COHORT);
         fprintf('======================================================\n');
 
         % -----------------------------------------------------------------
@@ -301,25 +272,43 @@ if RUN_PREPROCESSING
         end
 
         % -----------------------------------------------------------------
-        % 1. Import the RR EGI recording (.mff) and load channel locations.
-        %    subjPath / mff_path were resolved in the registry scan above.
+        % Locate raw subject directory.
         % -----------------------------------------------------------------
-        EEG = pop_mffimport(mff_path);
+        subj_dir_idx = find(strcmp(all_subj_names, subjID), 1);
+        if isempty(subj_dir_idx)
+            warning('%s: directory not found, skipping.', subjID);
+            continue;
+        end
+
+        subjPath = fullfile(raw_data_path, data_dirs(subj_dir_idx).name);
+
+        % -----------------------------------------------------------------
+        % 1. Load raw data (cohort-specific importer).
+        %    KH: Curry .dat (loadcurry).  RR: EGI .mff (pop_mffimport).
+        %    [RR branch adapted from RRdata_EEG_preprocessing_Jan2026_v1.m;
+        %     verify channel count / reference channel in MATLAB.]
+        % -----------------------------------------------------------------
+        if strcmpi(cohort_import, 'mff')
+            mffFile = dir(fullfile(subjPath, '*.mff'));
+            if isempty(mffFile)
+                warning('%s: no .mff file found, skipping.', subjID);
+                continue;
+            end
+            EEG = pop_mffimport({fullfile(subjPath, mffFile(1).name)}, ...
+                'code', 'eventtype', 'reference', []);
+        else
+            curryFile = dir(fullfile(subjPath, 'Acquisition*.dat'));
+            if isempty(curryFile)
+                warning('%s: no Curry file found, skipping.', subjID);
+                continue;
+            end
+            EEG = loadcurry(fullfile(subjPath, curryFile(1).name), ...
+                'KeepTriggerChannel', 'True', ...
+                'CurryLocations', 'False');
+        end
 
         EEG.subject = subjID;
         EEG.etc.hw_filter_label = hw_filter_label;
-        EEG.etc.rr_condition    = rr_subjects(s_idx).condition;
-        EEG.etc.rr_folder       = rr_subjects(s_idx).folder;
-
-        % EGI 128-ch HydroCel channel locations.
-        if exist(egi_chanlocs_file, 'file')
-            EEG = pop_chanedit(EEG, 'lookup', egi_chanlocs_file);
-            EEG = eeg_checkset(EEG);
-            fprintf('  Channel locations loaded.\n');
-        else
-            warning('  EGI chanlocs file not found at %s. Proceeding without explicit locations.', ...
-                egi_chanlocs_file);
-        end
 
         fprintf('  Loaded raw: %d channels, %.1f seconds\n', ...
             EEG.nbchan, EEG.pnts / EEG.srate);
@@ -507,16 +496,7 @@ if RUN_PREPROCESSING
 
         pop_saveset(EEG, 'filename', [subjID '_cleaned_v4_merged.set'], ...
             'filepath', study_filepath);
-    end
-end
-if RUN_ICA
 
-    for s_idx = 6:numel(rr_subjects)
-
-        subjID   = rr_subjects(s_idx).nc_label;   % clean 'Nc##' used for all outputs
-        subjPath = rr_subjects(s_idx).subjPath;
-
-        EEG = pop_loadset(fullfile(study_filepath, [subjID '_cleaned_v4_merged.set']));
         % -----------------------------------------------------------------
         % 9. ICA on 1 Hz copy, transfer weights to 0.5 Hz data.
         % -----------------------------------------------------------------
@@ -527,7 +507,7 @@ if RUN_ICA
         EEG.icasphere   = EEG_ica.icasphere;
         EEG.icawinv     = EEG_ica.icawinv;
         EEG.icachansind = EEG_ica.icachansind;
-        EEG             = eeg_checkset(EEG);
+        EEG = eeg_checkset(EEG);
 
         EEG = pop_iclabel(EEG, 'default');
 
@@ -607,10 +587,15 @@ if RUN_ICA
         % -----------------------------------------------------------------
         % 11. Outcome event codes and timing correction.
         % -----------------------------------------------------------------
-        % RR (EGI/NetStation) outcome markers. NetStation stores 4-char codes;
-        % 'rewa'/'puni' are 'reward'/'punish' truncated to 4 chars. VERIFY the
-        % exact strings in your MFF (run a trigger count) and extend if needed.
-        outcome_codes = {'rewa','puni'};
+        if strcmpi(COHORT, 'RR')
+            % RR (EGI) outcome markers are event strings. 'rewa' = reward shown.
+            % VERIFY against your RR event table; extend if loss has its own code.
+            outcome_codes = {'rewa','puni','corr','inco'};
+        elseif is_cohort1
+            outcome_codes = {'10','11', 10, 11};
+        else
+            outcome_codes = {'31','32','33','34', 31, 32, 33, 34};
+        end
 
         should_shift_outcome = ismember(subjID, misaligned_trigger_IDs);
 
@@ -771,17 +756,9 @@ if RUN_FEATURE_EXTRACTION
     fprintf('BUILDING OUTCOME FEATURE TABLES\n');
     fprintf('======================================================\n');
 
-    % Discover the same RR subjects as PART 1 (works even if PART 1 was skipped
-    % this run), then optionally subset to RR_PILOT_ONLY.
-    rr_subjects_feat = discover_rr_subjects(RR_data_path, RR_CONDITION_SUBFOLDERS);
-    if ~RUN_ALL_VALID_RR && ~isempty(rr_subjects_feat)
-        rr_subjects_feat = rr_subjects_feat(ismember([rr_subjects_feat.num], RR_PILOT_ONLY));
-    end
+    for participant = valid_participants
 
-    for s_idx = 1:numel(rr_subjects_feat)
-
-        subj        = rr_subjects_feat(s_idx).nc_label;   % clean 'Nc##'
-        participant = rr_subjects_feat(s_idx).num;
+        subj = sprintf('Ox%02d', participant);
         fprintf('\n============ FEATURE EXTRACTION %s ============\n', subj);
 
         if ~isfield(all_trial_data, subj)
@@ -817,19 +794,19 @@ if RUN_FEATURE_EXTRACTION
         % -----------------------------------------------------------------
         % Behavioural spine.
         % -----------------------------------------------------------------
-        subj_rows = string(RR_behav_table.subjID) == string(subj);
+        subj_rows = string(KH_behav_table.subjID) == string(subj);
         if ~any(subj_rows)
-            warning('%s has no rows in RR_behav_table. Skipping.', subj);
+            warning('%s has no rows in KH_behav_table. Skipping.', subj);
             continue;
         end
 
-        subj_features = RR_behav_table(subj_rows, :);
+        subj_features = KH_behav_table(subj_rows, :);
         n_rows = height(subj_features);
 
         subj_features.subj_id = repmat(string(subj), n_rows, 1);
-        subj_features.cohort  = repmat("RR", n_rows, 1);
+        subj_features.cohort  = repmat("KH", n_rows, 1);
         subj_features.subj    = repmat(participant, n_rows, 1);
-        subj_features.is_cohort1 = false(n_rows, 1);
+        subj_features.is_cohort1 = repmat(participant <= 8, n_rows, 1);
 
         if ~ismember('trial_continuous', subj_features.Properties.VariableNames)
             subj_features.trial_continuous = (1:n_rows)';
@@ -880,7 +857,7 @@ if RUN_FEATURE_EXTRACTION
                 error('%s lacks trial2epoch/trial2epoch_out.', trial2epoch_file);
             end
 
-            trial2epoch_raw = pad_or_truncate(trial2epoch_raw, n_rows);
+            % trial2epoch_raw = pad_or_truncate(trial2epoch_raw, n_rows);
 
             if isfield(S2, 'valid_ep')
                 valid_ep = S2.valid_ep(:);
@@ -891,10 +868,10 @@ if RUN_FEATURE_EXTRACTION
             using_trimmed_file = EEGp.trials <= numel(valid_ep) || ...
                 exist(fullfile(epoch_outpath, sprintf('%s_outcome_trimmed.set', subj)), 'file');
 
-            % FIXED: trial2epoch_raw is already correct for the loaded file
-            % No remapping needed - KH_align_epochs_with_offset created the correct mapping
-            trial2epoch = trial2epoch_raw;
+            % trial2epoch = remap_trial2epoch_to_loaded_file( ...
+            %     trial2epoch_raw, valid_ep, EEGp.trials, using_trimmed_file);
 
+            trial2epoch = trial2epoch_raw;
             if isfield(S2, 'hw_filter_label') && ~isempty(S2.hw_filter_label)
                 hw_filter_label_subj = normalize_hw_filter_label(S2.hw_filter_label);
             end
@@ -943,6 +920,7 @@ if RUN_FEATURE_EXTRACTION
 
         fcz_idx = find(chan_labels_lower == lower(string(fcz_label)));
         cz_idx  = find(chan_labels_lower == lower(string(cz_label)));
+        prefrontal_idx = find(ismember(chan_labels_lower, lower(string(prefrontal_channels))));
         par_idx = find(ismember(chan_labels_lower, lower(string(par_channels))));
         acc_idx = find(ismember(chan_labels_lower, lower(string(acc_channels))));
         som_idx = find(ismember(chan_labels_lower, lower(string(som_channels))));
@@ -1003,7 +981,7 @@ if RUN_FEATURE_EXTRACTION
         subj_features.PLV_fp_pairwise = nan(n_rows, 1);
         subj_features.PLV_fs_pairwise = nan(n_rows, 1);
 
-        subj_features.FCzCz_waveform = repmat({[]}, n_rows, 1);
+        subj_features.prefrontal_waveform = repmat({[]}, n_rows, 1);
         subj_features.P300_waveform  = repmat({[]}, n_rows, 1);
         subj_features.Theta_waveform = repmat({[]}, n_rows, 1);
 
@@ -1020,9 +998,10 @@ if RUN_FEATURE_EXTRACTION
 
             % FCz/Cz N2, FRN, RewP.
             if ~isempty(fcz_idx) && ~isempty(cz_idx) && ~isnan(bline_rms)
-                sig = mean(double(EEGp.data([fcz_idx(:)' cz_idx(:)'], :, ep)), 1, 'omitnan');
+                % sig = mean(double(EEGp.data([fcz_idx(:)' cz_idx(:)'], :, ep)), 1, 'omitnan');
+                sig = mean(double(EEGp.data(prefrontal_idx, :, ep)), 1, 'omitnan');
                 sig = sig - mean(sig(bl_mask), 'omitnan');
-                subj_features.FCzCz_waveform{ti} = sig;
+                subj_features.prefrontal_waveform{ti} = sig;
 
                 win_vals = sig(n2_mask);
                 win_t = EEGp.times(n2_mask);
@@ -1236,7 +1215,7 @@ if RUN_FEATURE_EXTRACTION
     % only the single-trial frontocentral measures (FCz negative-peak + FCz/Cz
     % mean); it does NOT carry FRN/RewP.
     % ---------------------------------------------------------------------
-    frn_rewp_opts = struct('wave_col','FCzCz_waveform', ...
+    frn_rewp_opts = struct('wave_col','prefrontal_waveform', ...
                            'FRN_win',[250 300], 'RewP_win',[250 350], ...
                            'stages',{stage_names}, 'block_types',{BTYPE_LABELS});
     frn_rewp_stage_table = kh_compute_frn_rewp_by_stage(all_trials_table, t_ax, frn_rewp_opts);
@@ -1248,12 +1227,12 @@ if RUN_FEATURE_EXTRACTION
 
     % Per-trial table keeps ONLY single-trial frontocentral measures.
     % The original PART-2 'FRN_mean_amp' is exactly the FCz/Cz fixed-window mean,
-    % so rename it to FCzCz_mean_amp (+ _norm) and DROP the misleading single-trial
+    % so rename it to prefrontal_mean_amp (+ _norm) and DROP the misleading single-trial
     % FRN_*/RewP_* columns (the true FRN/RewP live in frn_rewp_stage_table above).
     if ismember('FRN_mean_amp', all_trials_table.Properties.VariableNames)
-        all_trials_table.FCzCz_mean_amp  = all_trials_table.FRN_mean_amp;
+        all_trials_table.prefrontal_mean_amp  = all_trials_table.FRN_mean_amp;
         if ismember('FRN_mean_norm', all_trials_table.Properties.VariableNames)
-            all_trials_table.FCzCz_mean_norm = all_trials_table.FRN_mean_norm;
+            all_trials_table.prefrontal_mean_norm = all_trials_table.FRN_mean_norm;
         end
     end
     drop_cols = intersect(all_trials_table.Properties.VariableNames, ...
@@ -1287,65 +1266,16 @@ if RUN_FEATURE_EXTRACTION
     end
 end
 
-fprintf('\nRR preprocessing + outcome feature construction complete.\n');
+fprintf('\nMerged KH preprocessing + outcome feature construction complete.\n');
 
 % =============================================================================
 %% LOCAL FUNCTIONS
 % =============================================================================
 
-function rr_subjects = discover_rr_subjects(rr_data_path, condition_subfolders)
-% Scan the RR Data tree (organised by task condition) and return a struct
-% array of subjects. Each of the 15 Nc subjects lives in exactly ONE condition
-% subfolder, in a folder named like "Nc01_p1_DPDP" that contains the EGI
-% recording as a single ".mff" folder. We parse the clean "Nc##" label and
-% locate that .mff. Fields: nc_label, num, condition, folder, subjPath, mff_path.
-
-rr_subjects = struct('nc_label', {}, 'num', {}, 'condition', {}, ...
-                     'folder', {}, 'subjPath', {}, 'mff_path', {});
-
-for cf = 1:numel(condition_subfolders)
-    cond_name = condition_subfolders{cf};
-    cond_path = fullfile(rr_data_path, cond_name);
-    if ~exist(cond_path, 'dir')
-        warning('RR condition subfolder not found: %s', cond_path);
-        continue;
-    end
-
-    subj_dirs = dir(fullfile(cond_path, 'Nc*'));
-    subj_dirs = subj_dirs([subj_dirs.isdir]);
-
-    for sd = 1:numel(subj_dirs)
-        folder_name = subj_dirs(sd).name;                    % 'Nc01_p1_DPDP'
-        nc_label = regexp(folder_name, '^Nc\d+', 'match', 'once');
-        if isempty(nc_label)
-            warning('Could not parse Nc## from folder %s -- skipping.', folder_name);
-            continue;
-        end
-
-        subjPath = fullfile(cond_path, folder_name);
-
-        % The .mff is a NetStation FOLDER inside the subject folder.
-        mff_dirs = dir(fullfile(subjPath, '*.mff'));
-        if isempty(mff_dirs)
-            warning('%s (%s): no .mff folder found -- skipping.', nc_label, cond_name);
-            continue;
-        end
-
-        rr_subjects(end+1) = struct( ...
-            'nc_label', nc_label, ...
-            'num', str2double(regexp(nc_label, '\d+', 'match', 'once')), ...
-            'condition', cond_name, ...
-            'folder', folder_name, ...
-            'subjPath', subjPath, ...
-            'mff_path', fullfile(subjPath, mff_dirs(1).name)); %#ok<AGROW>
-    end
-end
-
-end
-
 function EEG_loaded = load_first_existing_set(folder, candidates)
 
 EEG_loaded = [];
+
 for ci = 1:numel(candidates)
     f = fullfile(folder, candidates{ci});
     if exist(f, 'file')
@@ -1851,7 +1781,7 @@ end
 
 function make_subject_qc_figure(T, times, plot_window, fig_folder, subj)
 
-if ~ismember('FCzCz_waveform', T.Properties.VariableNames)
+if ~ismember('prefrontal_waveform', T.Properties.VariableNames)
     return;
 end
 
@@ -1883,7 +1813,7 @@ for s = 1:min(4, numel(stage_names))
             ~T.epoch_artifact_flag & ...
             ~T.false_fb;
 
-        waves = T.FCzCz_waveform(m);
+        waves = T.prefrontal_waveform(m);
         waves = waves(~cellfun(@isempty, waves));
 
         if isempty(waves), continue; end

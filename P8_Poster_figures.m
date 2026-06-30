@@ -1,0 +1,723 @@
+% =============================================================================
+% P8_poster_figures.m
+%
+% POSTER FIGURES — the EEG counterpart to the behavioural plots (S6).
+%
+% TITLE
+%   "Uncertainty calibrates behavioural and neural adaptation to category
+%    switching"
+%
+% AUDIENCE / STORYLINE (psychiatry)
+%   Maladaptive responses to uncertainty are transdiagnostic. To know what
+%   goes wrong in illness we first need healthy benchmarks for how PRIOR and
+%   CURRENT uncertainty recalibrate learning and its neural signatures. This
+%   script builds the neural half of that story, mirroring the behavioural
+%   panels in S6 so the poster reads as one narrative:
+%
+%     ACT 1  Current uncertainty (D vs P) reshapes outcome processing
+%            -> FRN/prefrontal negativity, P300, frontal theta by block type x outcome
+%     ACT 2  Adaptation around the category switch (LN -> LE -> RN -> RE)
+%            -> the same neural signatures across task stages, D vs P
+%     ACT 3  PRIOR uncertainty leaves a trace (the key transdiagnostic point)
+%            -> neural signatures by block TRANSITION (D->D/D->P/P->D/P->P)
+%               and by cumulative prior exposure (n_prev_P)
+%     ACT 4  Two cortical routes: fronto-parietal vs fronto-sensory coupling
+%            -> attenuated FP (less prediction-error updating) + prolonged FS
+%               (compensatory stimulus-driven processing) under uncertainty
+%     ACT 5  Brain <-> behaviour: does neural adaptation track performance and
+%            metacognition? (PLV -> next-trial accuracy; confidence x FRN)
+%
+% The RESULTS are still TBD: this script computes and plots whatever exists in
+% the combined feature table and degrades gracefully (guards + messages) when
+% a column or file is missing, so the poster panels populate as analyses land.
+%
+% COLOURS are taken from pipeline/utils/kh_poster_palette so they match S6:
+%   blue = deterministic/certain, orange-red = probabilistic/uncertain,
+%   green/red = correct/incorrect, fixed stage + transition colours,
+%   teal = fronto-parietal, purple = fronto-sensory.
+%
+% INPUT  : group_feature_table_combined.mat (group_table) from S4
+%          (+ frn_rewp_by_stage_combined.mat and a t_ax for the ERP waveforms).
+% OUTPUT : poster-quality PDFs/PNGs in Results/.../Figures/Poster_P8 and a
+%          master storyboard figure tying the panels into the narrative.
+%
+% Figures are styled via pipeline/utils/apply_fig_style (ticks OUTSIDE, no
+% top/right box, even/poster-quality layout).
+% =============================================================================
+
+clear; close all; clc;
+addpath(genpath(fileparts(mfilename('fullpath'))));   % pipeline utils on path
+set(groot, 'defaultAxesTickDir', 'out');
+set(groot, 'defaultAxesBox', 'off');
+
+
+%% ─── SETTINGS ─────────────────────────────────────────────────────────────
+PAL    = kh_poster_palette();          % consistent colours (matches S6)
+STAGES = {'LN','LE','RN','RE'};
+STAGE_LBLS = {'LN (start)','LE (pre-switch)','RN (post-switch)','RE (end)'};
+TRANS  = {'D->D','D->P','P->D','P->P'};
+
+% EEG measures to feature on the poster. Each row: {column, label, polarity}.
+% polarity = -1 if more-negative-is-bigger (FRN), else +1 (display only).
+% _z columns are preferred when present (within-subject z; built by S3/S4).
+EEG_MEASURES = {
+    'prefrontal_neg_peak_norm', 'prefrontal negativity (FRN)',        -1
+    'P300_norm',         'P300 amplitude',               +1
+    'Theta_amp',         'Frontal theta power',          +1
+    'PLV_fp',            'Fronto-parietal coupling',     +1
+    'PLV_fs',            'Fronto-sensory coupling',      +1 };
+
+% ERP difference-wave windows (ms) shaded on the grand-average panel.
+FRN_WIN  = [250 300];
+RewP_WIN = [250 350];
+ERP_XLIM = [-200 800];
+
+%% ─── PATHS ─────────────────────────────────────────────────────────────────
+remote = 0;
+switch remote
+    case 1, base_path = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch';
+    otherwise, base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
+end
+kh_results = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis');
+feat_dir   = fullfile(kh_results, 'Outcome_feature_tables_v4_merged');
+outdir     = fullfile(kh_results, 'Figures', 'Poster_P8');
+if ~exist(outdir, 'dir'), mkdir(outdir); end
+
+%% ─── LOAD COMBINED EEG TABLE (from S4) ──────────────────────────────────────
+
+
+% FRN/RewP difference-wave table + a time axis (optional; for the ERP panel).
+frn_tbal = load(fullfile(feat_dir,   'group_feature_table_KH_final.mat'));
+t_ax = frn_tbal.t_ax;
+frn_tbl = frn_tbal.frn_rewp_stage_table;
+% frn_tbl = load_first_var({ ...
+%     fullfile(feat_dir,   'frn_rewp_by_stage_combined.mat'), ...
+%     fullfile(feat_dir,   'group_feature_table_KH_final.mat'), ...
+%     fullfile(feat_dir,   'group_feature_table_combined_KH.mat')}, ...
+%     'frn_rewp_stage_table');
+% t_ax = load_first_var({ ...
+%     fullfile(feat_dir, 'group_feature_table_KH_final.mat'), ...
+%     fullfile(feat_dir, 'group_feature_table_combined_KH.mat')}, 't_ax');
+
+gt = load(fullfile(kh_results, 'Epoched_data', 'group_feature_table_combined.mat'), 'group_table');
+
+% load_first_var({ ...
+%     fullfile(feat_dir,   'group_feature_table_combined.mat'), ...
+%     fullfile(kh_results, 'Epoched_data', 'group_feature_table_combined.mat'), ...
+%     fullfile(kh_results, 'Epoched_data_noisefiltering', 'group_feature_table_combined.mat')}, ...
+%     'group_table');
+if isempty(gt)
+    error('P8: combined EEG table not found. Run S4_merge_feature_tables first.');
+end
+fprintf('P8: loaded EEG table — %d trials, %d subjects.\n', ...
+    height(gt), numel(unique(string(gt.subj_id))));
+
+gt = gt.group_table;
+%% ─── PREPROCESS TABLE ───────────────────────────────────────────────────────
+gt.subj_id_s = string(gt.subj_id);
+
+% Outcome as numeric 0/1 (tolerate 'correct' or 'correct_num').
+if ismember('correct_num', gt.Properties.VariableNames)
+    gt.correct_num = double(gt.correct_num);
+elseif ismember('correct', gt.Properties.VariableNames)
+    gt.correct_num = double(gt.correct);
+else
+    gt.correct_num = nan(height(gt),1);
+end
+
+% Block type cleaned to D/P (legacy 'V' visual probabilistic -> 'P').
+bt = string(gt.block_type);  bt(bt=="V") = "P";
+gt.block_type_clean = bt;
+
+% Stage as string for masking.
+gt.stage_s = string(gt.stage);
+
+% false_fb logical (default false if absent).
+if ismember('false_fb', gt.Properties.VariableNames)
+    gt.false_fb = logical(gt.false_fb);
+else
+    gt.false_fb = false(height(gt),1);
+end
+
+% Block index for transition / n_prev_P derivation.
+if ismember('block', gt.Properties.VariableNames)
+    gt.block_n = kh_to_numeric(gt.block);
+elseif ismember('block_number', gt.Properties.VariableNames)
+    gt.block_n = kh_to_numeric(gt.block_number);
+else
+    gt.block_n = nan(height(gt),1);
+end
+
+% ── Derive transition (prev->curr) and n_prev_P (S6 logic) ──────────────────
+gt.transition = strings(height(gt),1);
+gt.n_prev_P   = nan(height(gt),1);
+subs = unique(gt.subj_id_s);
+for si = 1:numel(subs)
+    sm   = gt.subj_id_s == subs(si);
+    blks = sort(unique(gt.block_n(sm & ~isnan(gt.block_n)))');
+    for bi = 1:numel(blks)
+        b  = blks(bi);  bm = sm & gt.block_n == b;
+        curr = gt.block_type_clean(find(bm,1));
+        if bi == 1
+            gt.transition(bm) = "first";  gt.n_prev_P(bm) = 0;
+        else
+            prev = gt.block_type_clean(find(sm & gt.block_n==blks(bi-1),1));
+            gt.transition(bm) = prev + "->" + curr;
+            priorP = 0;
+            for pb = blks(1:bi-1)
+                if gt.block_type_clean(find(sm & gt.block_n==pb,1))=="P", priorP = priorP+1; end
+            end
+            gt.n_prev_P(bm) = priorP;
+        end
+    end
+end
+
+% ── Ensure a usable (z-scored) column for each EEG measure ──────────────────
+% Prefer an existing *_z column; otherwise z-score within subject here so the
+% poster scales are comparable across subjects/cohorts.
+for mi = 1:size(EEG_MEASURES,1)
+    raw = EEG_MEASURES{mi,1};
+    if ~ismember(raw, gt.Properties.VariableNames)
+        EEG_MEASURES{mi,1} = '';   % mark missing; panels will skip it
+        continue;
+    end
+    zc = [raw '_z'];
+    if ~ismember(zc, gt.Properties.VariableNames)
+        gt.(zc) = zscore_within(gt.(raw), gt.subj_id_s, subs);
+    end
+    EEG_MEASURES{mi,4} = zc;        % 4th col = z column name to plot
+end
+EEG_MEASURES = EEG_MEASURES(~cellfun(@isempty, EEG_MEASURES(:,1)), :);
+fprintf('P8: %d EEG measures available for plotting.\n', size(EEG_MEASURES,1));
+
+% ── Subject x stage matrices, per measure and block type (parallels S6 SMAT) ─
+N = numel(subs); nStg = numel(STAGES);
+SMAT = struct();
+for mi = 1:size(EEG_MEASURES,1)
+    zc = EEG_MEASURES{mi,4};
+    key = matlab.lang.makeValidName(zc);
+    SMAT.(key).all = nan(N,nStg); SMAT.(key).D = nan(N,nStg); SMAT.(key).P = nan(N,nStg);
+    for s = 1:N
+        for k = 1:nStg
+            base = gt.subj_id_s==subs(s) & gt.stage_s==STAGES{k} & ~gt.false_fb;
+            v = gt.(zc)(base);                         if any(~isnan(v)), SMAT.(key).all(s,k)=mean(v,'omitnan'); end
+            vD= gt.(zc)(base & gt.block_type_clean=="D"); if any(~isnan(vD)), SMAT.(key).D(s,k)=mean(vD,'omitnan'); end
+            vP= gt.(zc)(base & gt.block_type_clean=="P"); if any(~isnan(vP)), SMAT.(key).P(s,k)=mean(vP,'omitnan'); end
+        end
+    end
+end
+
+
+% =============================================================================
+%% ACT 1 — CURRENT UNCERTAINTY RESHAPES OUTCOME PROCESSING
+%   P8.1a: outcome ERP grand-average difference waves (incorrect - correct),
+%          D vs P blocks, from the per-stage FRN/RewP table (needs t_ax).
+%   P8.1b: each EEG measure by block type x outcome (correct/incorrect).
+% =============================================================================
+
+% ── P8.1a: ERP difference-wave grand averages (D vs P) ──────────────────────
+if ~isempty(frn_tbl) && ~isempty(t_ax) && ismember('diff_wave', frn_tbl.Properties.VariableNames)
+    fig = figure('Position',[60 60 760 460]); hold on;
+    title('Outcome difference wave (incorrect - correct): certain vs uncertain');
+    for bi = 1:2
+        bt = {'D','P'}; clr = {PAL.D, PAL.P}; lbl = {'Deterministic (certain)','Probabilistic (uncertain)'};
+        sel = string(frn_tbl.block_type) == bt{bi};
+        dw  = frn_tbl.diff_wave(sel);  dw = dw(~cellfun(@isempty,dw));
+        if isempty(dw), continue; end
+        M  = cell2mat(cellfun(@(x) x(:)', dw, 'UniformOutput', false));
+        mn = mean(M,1,'omitnan');  se = std(M,0,1,'omitnan')/sqrt(size(M,1));
+        fill([t_ax fliplr(t_ax)], [mn+se fliplr(mn-se)], clr{bi}, ...
+            'FaceAlpha',0.15,'EdgeColor','none','HandleVisibility','off');
+        plot(t_ax, mn, 'Color', clr{bi}, 'LineWidth', 2.5, 'DisplayName', lbl{bi});
+    end
+    yl = ylim;
+    patch([FRN_WIN fliplr(FRN_WIN)],[yl(1) yl(1) yl(2) yl(2)],PAL.lightgrey, ...
+        'FaceAlpha',0.25,'EdgeColor','none','HandleVisibility','off');
+    text(mean(FRN_WIN), yl(2)*0.9, 'FRN', 'HorizontalAlignment','center','Color',PAL.grey);
+    xline(0,'k:','HandleVisibility','off'); yline(0,'k:','HandleVisibility','off');
+    set(gca,'YDir','reverse');   % EEG negative-up
+    xlim(ERP_XLIM); xlabel('Time from outcome (ms)'); ylabel('\muV (incorrect - correct)');
+    legend('Box','off','Location','southeast');
+    save_poster_fig(fig, fullfile(outdir,'P8_1a_ERP_diffwave_DvsP'));
+else
+    fprintf('P8.1a skipped: need frn_rewp table + t_ax for ERP waveforms.\n');
+end
+
+% ── P8.1b: EEG measures by block type x outcome ─────────────────────────────
+fig = figure('Position',[60 60 1500 360]);
+sgtitle('Outcome processing by certainty and outcome (subject means \pm SEM)');
+nM = size(EEG_MEASURES,1);
+for mi = 1:nM
+    zc = EEG_MEASURES{mi,4};
+    ax = subplot(1,nM,mi); hold(ax,'on'); title(ax, EEG_MEASURES{mi,2},'FontSize',9);
+    % 2 (D/P) x 2 (correct/incorrect) grouped bars, subject-averaged.
+    grp_clr = {PAL.D, PAL.P};  bt = {'D','P'};
+    for bi = 1:2
+        for co = [1 0]
+            v = subject_means(gt, zc, gt.block_type_clean==bt{bi} & gt.correct_num==co & ~gt.false_fb, subs);
+            fa = 0.85*(co==1) + 0.35*(co==0);
+            bar(ax, bi + 0.18*(co==0) - 0.09, mean(v,'omitnan'), 0.32, ...
+                'FaceColor',grp_clr{bi},'FaceAlpha',fa,'EdgeColor','none', ...
+                'HandleVisibility','off');
+            errorbar(ax, bi + 0.18*(co==0) - 0.09, mean(v,'omitnan'), sem(v), ...
+                'k.','LineWidth',1.1,'CapSize',4,'HandleVisibility','off');
+        end
+    end
+    set(ax,'XTick',[1 2],'XTickLabel',{'Certain','Uncertain'},'FontSize',8);
+    ylabel(ax, sprintf('%s (z)', EEG_MEASURES{mi,2}),'FontSize',8);
+    yline(ax,0,'k:','HandleVisibility','off');
+end
+% Shared legend (solid = correct, faded = incorrect)
+annotation('textbox',[0.01 0.0 0.98 0.06],'String', ...
+    'Solid = correct,  faded = incorrect.  Blue = certain (D),  orange = uncertain (P).', ...
+    'EdgeColor','none','FontSize',8,'Color',PAL.grey,'HorizontalAlignment','center');
+save_poster_fig(fig, fullfile(outdir,'P8_1b_measures_block_outcome'));
+
+
+% =============================================================================
+%% ACT 2 — NEURAL ADAPTATION ACROSS THE CATEGORY SWITCH (LN -> LE -> RN -> RE)
+%   One panel per EEG measure: stage profile, D vs P overlaid.
+%   Parallels S6's stage panels (Fig S1/S3) but for neural signatures.
+% =============================================================================
+fig = figure('Position',[40 40 1500 360]);
+sgtitle('Neural adaptation across task stages: certain (blue) vs uncertain (orange)');
+x = 1:nStg;
+for mi = 1:nM
+    zc  = EEG_MEASURES{mi,4};  key = matlab.lang.makeValidName(zc);
+    ax  = subplot(1,nM,mi); hold(ax,'on'); title(ax, EEG_MEASURES{mi,2},'FontSize',9);
+
+    mD = SMAT.(key).D;  mP = SMAT.(key).P;
+    % faint per-subject lines for transparency of the data
+    for s = 1:N
+        if ~all(isnan(mD(s,:))), plot(ax, x, mD(s,:), '-', 'Color',[PAL.D 0.12],'HandleVisibility','off'); end
+        if ~all(isnan(mP(s,:))), plot(ax, x, mP(s,:), '-', 'Color',[PAL.P 0.12],'HandleVisibility','off'); end
+    end
+    errorbar(ax, x, mean(mD,1,'omitnan'), stage_sem(mD), 'o-', ...
+        'Color',PAL.D,'MarkerFaceColor',PAL.D,'LineWidth',2.2,'DisplayName','Certain (D)');
+    errorbar(ax, x, mean(mP,1,'omitnan'), stage_sem(mP), 's--', ...
+        'Color',PAL.P,'MarkerFaceColor',PAL.P,'LineWidth',2.2,'DisplayName','Uncertain (P)');
+    xline(ax, 2.5, 'k:', 'HandleVisibility','off');   % switch between LE and RN
+    text(ax, 2.5, ax.YLim(2), ' switch', 'Color',PAL.grey,'FontSize',7,'VerticalAlignment','top');
+    set(ax,'XTick',x,'XTickLabel',STAGES,'FontSize',8); xlim(ax,[0.5 nStg+0.5]);
+    ylabel(ax, sprintf('%s (z)',EEG_MEASURES{mi,2}),'FontSize',8);
+    if mi==nM, legend(ax,'Box','off','Location','best','FontSize',7); end
+end
+save_poster_fig(fig, fullfile(outdir,'P8_2_measures_by_stage_DvsP'));
+
+% =============================================================================
+%% ACT 3 — PRIOR UNCERTAINTY LEAVES A NEURAL TRACE  (the transdiagnostic hook)
+%   P8.3a: each measure by block TRANSITION (D->D / D->P / P->D / P->P)
+%   P8.3b: each measure vs cumulative prior exposure (n_prev_P)
+%   Focus stage = RN (reversal-naive: right after the switch, where prior
+%   uncertainty should bite most), pooled over true-feedback trials.
+% =============================================================================
+focus_stage = 'RN';
+
+% ── P8.3a: by transition type ───────────────────────────────────────────────
+fig = figure('Position',[40 40 1500 360]);
+sgtitle(sprintf('Prior \\rightarrow current uncertainty: neural signatures at %s (post-switch)', focus_stage));
+for mi = 1:nM
+    zc = EEG_MEASURES{mi,4};
+    ax = subplot(1,nM,mi); hold(ax,'on'); title(ax, EEG_MEASURES{mi,2},'FontSize',9);
+    for k = 1:numel(TRANS)
+        msk = gt.transition==TRANS{k} & gt.stage_s==focus_stage & ~gt.false_fb;
+        v   = subject_means(gt, zc, msk, subs);
+        bar(ax, k, mean(v,'omitnan'), 0.62, 'FaceColor',PAL.trans_list(k,:), ...
+            'EdgeColor','none','FaceAlpha',0.85,'HandleVisibility','off');
+        errorbar(ax, k, mean(v,'omitnan'), sem(v),'k.','LineWidth',1.1,'CapSize',4,'HandleVisibility','off');
+    end
+    set(ax,'XTick',1:numel(TRANS),'XTickLabel',strrep(TRANS,'->','\rightarrow'),'FontSize',7);
+    ylabel(ax, sprintf('%s (z)',EEG_MEASURES{mi,2}),'FontSize',8);
+    yline(ax,0,'k:','HandleVisibility','off');
+end
+annotation('textbox',[0.01 0.0 0.98 0.05],'String', ...
+    'Transition = previous block \rightarrow current block. P\rightarrow* tests the carry-over of prior uncertainty.', ...
+    'EdgeColor','none','FontSize',8,'Color',PAL.grey,'HorizontalAlignment','center');
+save_poster_fig(fig, fullfile(outdir,'P8_3a_measures_by_transition'));
+
+% ── P8.3b: by cumulative prior P exposure (n_prev_P) ────────────────────────
+np_levels = unique(gt.n_prev_P(~isnan(gt.n_prev_P)))';
+fig = figure('Position',[40 40 1500 360]);
+sgtitle('Neural signatures vs cumulative prior uncertainty (number of previous P blocks)');
+for mi = 1:nM
+    zc = EEG_MEASURES{mi,4};
+    ax = subplot(1,nM,mi); hold(ax,'on'); title(ax, EEG_MEASURES{mi,2},'FontSize',9);
+    mu = nan(1,numel(np_levels)); se_ = nan(1,numel(np_levels));
+    for k = 1:numel(np_levels)
+        msk = gt.n_prev_P==np_levels(k) & gt.stage_s==focus_stage & ~gt.false_fb;
+        v   = subject_means(gt, zc, msk, subs);
+        mu(k) = mean(v,'omitnan'); se_(k) = sem(v);
+    end
+    errorbar(ax, np_levels, mu, se_, 'o-', 'Color',PAL.P, ...
+        'MarkerFaceColor',PAL.P,'LineWidth',2.2,'HandleVisibility','off');
+    lsline_safe(ax, np_levels, mu, PAL.grey);   % trend line if >=2 points
+    set(ax,'XTick',np_levels,'FontSize',8); xlim(ax,[min(np_levels)-0.5 max(np_levels)+0.5]);
+    xlabel(ax,'# previous P blocks','FontSize',8);
+    ylabel(ax, sprintf('%s (z)',EEG_MEASURES{mi,2}),'FontSize',8);
+    yline(ax,0,'k:','HandleVisibility','off');
+end
+save_poster_fig(fig, fullfile(outdir,'P8_3b_measures_by_nprevP'));
+
+
+% =============================================================================
+%% ACT 4 — TWO CORTICAL ROUTES: FRONTO-PARIETAL vs FRONTO-SENSORY COUPLING
+%   Story: uncertainty ATTENUATES fronto-parietal coupling (less prediction-
+%   error updating) while PROLONGING fronto-sensory coupling (compensatory
+%   stimulus-driven processing). Show both pathways across stages, D vs P.
+% =============================================================================
+have_fp = ismember('PLV_fp_z', gt.Properties.VariableNames);
+have_fs = ismember('PLV_fs_z', gt.Properties.VariableNames);
+if have_fp && have_fs
+    keyfp = matlab.lang.makeValidName('PLV_fp_z');
+    keyfs = matlab.lang.makeValidName('PLV_fs_z');
+
+    fig = figure('Position',[40 40 1100 460]);
+    sgtitle('Dual pathways under uncertainty: fronto-parietal vs fronto-sensory coupling');
+
+    % Left: pathway x block type (pooled over stages)
+    axL = subplot(1,2,1); hold(axL,'on'); title(axL,'Coupling by certainty');
+    paths = {keyfp, keyfs}; pclr = {PAL.fp, PAL.fs}; plbl = {'Fronto-parietal','Fronto-sensory'};
+    for pi = 1:2
+        for bi = 1:2
+            bt = {'D','P'};
+            v = subject_means(gt, paths{pi}, gt.block_type_clean==bt{bi} & ~gt.false_fb, subs);
+            xpos = pi + (bi-1.5)*0.32;
+            fa   = 0.85*(bi==1) + 0.45*(bi==2);
+            bar(axL, xpos, mean(v,'omitnan'), 0.3, 'FaceColor',pclr{pi},'FaceAlpha',fa, ...
+                'EdgeColor','none','HandleVisibility','off');
+            errorbar(axL, xpos, mean(v,'omitnan'), sem(v),'k.','LineWidth',1.1,'CapSize',4,'HandleVisibility','off');
+        end
+    end
+    set(axL,'XTick',[1 2],'XTickLabel',plbl,'FontSize',9); ylabel(axL,'PLV (z)');
+    yline(axL,0,'k:'); 
+    annotation('textbox',[0.13 0.0 0.36 0.05],'String','Solid = certain (D),  faded = uncertain (P)', ...
+        'EdgeColor','none','FontSize',8,'Color',PAL.grey,'HorizontalAlignment','center');
+
+    % Right: stage profile, both pathways, uncertain (P) blocks
+    axR = subplot(1,2,2); hold(axR,'on'); title(axR,'Stage profile (uncertain blocks)');
+    errorbar(axR, x, mean(SMAT.(keyfp).P,1,'omitnan'), stage_sem(SMAT.(keyfp).P), 'o-', ...
+        'Color',PAL.fp,'MarkerFaceColor',PAL.fp,'LineWidth',2.2,'DisplayName','Fronto-parietal');
+    errorbar(axR, x, mean(SMAT.(keyfs).P,1,'omitnan'), stage_sem(SMAT.(keyfs).P), 's--', ...
+        'Color',PAL.fs,'MarkerFaceColor',PAL.fs,'LineWidth',2.2,'DisplayName','Fronto-sensory');
+    xline(axR, 2.5, 'k:','HandleVisibility','off');
+    set(axR,'XTick',x,'XTickLabel',STAGES,'FontSize',9); xlim(axR,[0.5 nStg+0.5]);
+    ylabel(axR,'PLV (z)'); legend(axR,'Box','off','Location','best','FontSize',8);
+    save_poster_fig(fig, fullfile(outdir,'P8_4_pathways_FP_vs_FS'));
+else
+    fprintf('P8.4 skipped: need PLV_fp and PLV_fs columns.\n');
+end
+
+% =============================================================================
+%% ACT 5 — BRAIN <-> BEHAVIOUR: does neural adaptation track behaviour?
+%   P8.5a: confidence x FRN coupling, certain vs uncertain (metacognition).
+%   P8.5b: fronto-parietal coupling predicting NEXT-trial accuracy.
+% =============================================================================
+
+% ── P8.5a: confidence vs FRN, split by block type ───────────────────────────
+if ismember('confidence', gt.Properties.VariableNames) && ...
+   ismember('prefrontal_neg_peak_norm_z', gt.Properties.VariableNames)
+    fig = figure('Position',[60 60 760 430]); hold on;
+    title('Metacognition: confidence \times outcome negativity (FRN)');
+    bt = {'D','P'}; clr = {PAL.D, PAL.P}; lbl = {'Certain (D)','Uncertain (P)'};
+    for bi = 1:2
+        msk = gt.block_type_clean==bt{bi} & ~gt.false_fb & ...
+              ~isnan(gt.confidence) & ~isnan(gt.prefrontal_neg_peak_norm_z);
+        cz = zscore_within(gt.confidence, gt.subj_id_s, subs);
+        xx = cz(msk); yy = gt.prefrontal_neg_peak_norm_z(msk);
+        scatter(xx, yy, 8, clr{bi}, 'filled', 'MarkerFaceAlpha',0.12,'HandleVisibility','off');
+        lsline_safe(gca, xx, yy, clr{bi}, lbl{bi});
+    end
+    xlabel('Confidence (within-subject z)'); ylabel('prefrontal negativity (z)');
+    set(gca,'YDir','reverse'); yline(0,'k:','HandleVisibility','off'); xline(0,'k:','HandleVisibility','off');
+    legend('Box','off','Location','best');
+    save_poster_fig(fig, fullfile(outdir,'P8_5a_confidence_FRN'));
+else
+    fprintf('P8.5a skipped: need confidence + prefrontal_neg_peak_norm_z.\n');
+end
+
+% ── P8.5b: fronto-parietal coupling -> next-trial accuracy ──────────────────
+if have_fp
+    nc = next_trial_correct(gt, subs);     % respects block boundaries
+    gt.next_correct = nc;
+    msk = ~isnan(gt.PLV_fp_z) & ~isnan(gt.next_correct);
+    if nnz(msk) > 20
+        % Bin FP coupling into terciles within subject, plot P(next correct).
+        terc = tercile_within(gt.PLV_fp_z, gt.subj_id_s, subs);
+        fig = figure('Position',[60 60 640 430]); hold on;
+        title('Fronto-parietal coupling predicts next-trial accuracy');
+        for bi = 1:2
+            bt = {'D','P'}; clr = {PAL.D, PAL.P};
+            mu = nan(1,3); se_=nan(1,3);
+            for tlev = 1:3
+                m2 = msk & terc==tlev & gt.block_type_clean==bt{bi};
+                v  = subject_means(gt, 'next_correct', m2, subs);
+                mu(tlev)=mean(v,'omitnan'); se_(tlev)=sem(v);
+            end
+            errorbar(1:3, mu, se_, 'o-','Color',clr{bi},'MarkerFaceColor',clr{bi}, ...
+                'LineWidth',2.2,'DisplayName',sprintf('%s blocks',bt{bi}));
+        end
+        set(gca,'XTick',1:3,'XTickLabel',{'low','mid','high'});
+        xlabel('Fronto-parietal coupling (within-subject tercile)');
+        ylabel('P(next trial correct)'); ylim([0 1]); legend('Box','off','Location','best');
+        save_poster_fig(fig, fullfile(outdir,'P8_5b_FPcoupling_next_accuracy'));
+    else
+        fprintf('P8.5b skipped: too few trials with PLV_fp + next_correct.\n');
+    end
+end
+
+
+% =============================================================================
+%% MASTER POSTER STORYBOARD
+%   A single landscape figure laying out the narrative for a psychiatry
+%   audience: title -> background -> task -> the four neural acts -> take-home.
+%   Key result panels are re-drawn compactly into a tiled layout so the poster
+%   reads top-left to bottom-right. Text boxes carry the storyline; they auto-
+%   fill with the headline direction of effects where these can be computed.
+% =============================================================================
+fig = figure('Position',[20 20 1700 1000], 'Color','w');
+tl  = tiledlayout(fig, 4, 4, 'TileSpacing','compact', 'Padding','compact');
+title(tl, 'Uncertainty calibrates behavioural and neural adaptation to category switching', ...
+    'FontWeight','bold','FontSize',16);
+
+% ── Tile 1 (background + question) — text ───────────────────────────────────
+ax = nexttile(tl,1,[1 2]); axis(ax,'off');
+storyline_box(ax, {
+    '\bfWhy this matters (psychiatry)\rm'
+    'Maladaptive responses to uncertainty are transdiagnostic: patients'
+    'over- or under-weight unreliable feedback and fail to adjust when the'
+    'world changes. We need healthy benchmarks for how PRIOR and CURRENT'
+    'uncertainty recalibrate learning and its neural signatures.'
+    ''
+    '\bfQuestion\rm  How does experienced uncertainty shape behavioural and'
+    'prefrontal adaptation to category switches?'});
+
+% ── Tile 2 (task schematic) — text/schematic ────────────────────────────────
+ax = nexttile(tl,3,[1 2]); axis(ax,'off');
+draw_task_schematic(ax, PAL);
+
+% ── Tile 3: ACT 1 — outcome processing by certainty (ERP diff wave) ─────────
+ax = nexttile(tl,5,[1 1]); hold(ax,'on'); title(ax,'1 | Outcome surprise \downarrow under uncertainty','FontSize',9);
+if ~isempty(frn_tbl) && ~isempty(t_ax) && ismember('diff_wave', frn_tbl.Properties.VariableNames)
+    for bi = 1:2
+        bt={'D','P'}; clr={PAL.D,PAL.P};
+        sel=string(frn_tbl.block_type)==bt{bi}; dw=frn_tbl.diff_wave(sel); dw=dw(~cellfun(@isempty,dw));
+        if isempty(dw), continue; end
+        M=cell2mat(cellfun(@(v) v(:)',dw,'UniformOutput',false));
+        plot(ax,t_ax,mean(M,1,'omitnan'),'Color',clr{bi},'LineWidth',2);
+    end
+    set(ax,'YDir','reverse'); xlim(ax,ERP_XLIM); xline(ax,0,'k:'); yline(ax,0,'k:');
+    xlabel(ax,'ms'); ylabel(ax,'inc-corr \muV');
+else
+    text(ax,0.5,0.5,'ERP waveforms pending','Units','normalized','HorizontalAlignment','center','Color',PAL.grey);
+end
+
+% ── Tile 4: ACT 2 — stage profile of FRN (or first measure) ─────────────────
+ax = nexttile(tl,6,[1 1]); hold(ax,'on'); title(ax,'2 | Adaptation across the switch','FontSize',9);
+key1 = matlab.lang.makeValidName(EEG_MEASURES{1,4});
+errorbar(ax,x,mean(SMAT.(key1).D,1,'omitnan'),stage_sem(SMAT.(key1).D),'o-','Color',PAL.D,'LineWidth',2,'MarkerFaceColor',PAL.D);
+errorbar(ax,x,mean(SMAT.(key1).P,1,'omitnan'),stage_sem(SMAT.(key1).P),'s--','Color',PAL.P,'LineWidth',2,'MarkerFaceColor',PAL.P);
+xline(ax,2.5,'k:'); set(ax,'XTick',x,'XTickLabel',STAGES,'FontSize',8); ylabel(ax,sprintf('%s (z)',EEG_MEASURES{1,2}),'FontSize',8);
+
+% ── Tile 5: ACT 3 — prior uncertainty (n_prev_P) on FRN ─────────────────────
+ax = nexttile(tl,7,[1 1]); hold(ax,'on'); title(ax,'3 | Prior uncertainty leaves a trace','FontSize',9);
+mu=nan(1,numel(np_levels));
+for k=1:numel(np_levels)
+    v=subject_means(gt, EEG_MEASURES{1,4}, gt.n_prev_P==np_levels(k) & gt.stage_s==focus_stage & ~gt.false_fb, subs);
+    mu(k)=mean(v,'omitnan');
+end
+plot(ax,np_levels,mu,'o-','Color',PAL.P,'LineWidth',2,'MarkerFaceColor',PAL.P);
+lsline_safe(ax,np_levels,mu,PAL.grey);
+set(ax,'XTick',np_levels,'FontSize',8); xlabel(ax,'# previous P','FontSize',8); ylabel(ax,sprintf('%s (z)',EEG_MEASURES{1,2}),'FontSize',8);
+
+% ── Tile 6: ACT 4 — dual pathways ───────────────────────────────────────────
+ax = nexttile(tl,8,[1 1]); hold(ax,'on'); title(ax,'4 | Two cortical routes','FontSize',9);
+if have_fp && have_fs
+    keyfp=matlab.lang.makeValidName('PLV_fp_z'); keyfs=matlab.lang.makeValidName('PLV_fs_z');
+    errorbar(ax,x,mean(SMAT.(keyfp).P,1,'omitnan'),stage_sem(SMAT.(keyfp).P),'o-','Color',PAL.fp,'LineWidth',2,'MarkerFaceColor',PAL.fp);
+    errorbar(ax,x,mean(SMAT.(keyfs).P,1,'omitnan'),stage_sem(SMAT.(keyfs).P),'s--','Color',PAL.fs,'LineWidth',2,'MarkerFaceColor',PAL.fs);
+    set(ax,'XTick',x,'XTickLabel',STAGES,'FontSize',8); ylabel(ax,'PLV (z)','FontSize',8);
+    legend(ax,{'fronto-parietal','fronto-sensory'},'Box','off','FontSize',7,'Location','best');
+else
+    text(ax,0.5,0.5,'PLV pending','Units','normalized','HorizontalAlignment','center','Color',PAL.grey);
+end
+
+% ── Tile 7 (bottom): take-home message — full width text ────────────────────
+ax = nexttile(tl,9,[1 4]); axis(ax,'off');
+storyline_box(ax, {
+    '\bfTake-home\rm'
+    '\bullet Current uncertainty differentially disrupts performance, confidence and outcome-evoked surprise (FRN/P300).'
+    '\bullet Prior uncertainty selectively impairs subsequent adaptation - even in stable blocks - mirroring rigidity/erratic switching seen across disorders.'
+    '\bullet Confidence tracks performance only when stable -> unstable contexts degrade metacognitive accuracy (relevant to psychiatric metacognition).'
+    '\bullet Uncertainty attenuates fronto-parietal coupling (less prediction-error updating) and prolongs fronto-sensory coupling (compensatory stimulus-driven processing).'
+    '\bfThese healthy benchmarks define the computational/neural targets against which transdiagnostic deficits can be measured.\rm'});
+
+% ── Tile 8 (bottom): methods footnote — full width text ─────────────────────
+ax = nexttile(tl,13,[1 4]); axis(ax,'off');
+storyline_box(ax, {
+    ['\itMethods\rm  32 healthy adults; tactile category-switching with interleaved deterministic (certain) ' ...
+     'and probabilistic (uncertain) blocks; trial-wise confidence; simultaneous EEG. RL models extract dynamic ' ...
+     'learning rates and change-point beliefs. Stages LN/LE/RN/RE index adaptation around each category switch. ' ...
+     'Colours: blue = certain (D), orange = uncertain (P); teal = fronto-parietal, purple = fronto-sensory.']});
+
+save_poster_fig(fig, fullfile(outdir,'P8_0_POSTER_storyboard'));
+
+fprintf('\nP8 complete. Poster panels + storyboard saved to:\n  %s\n', outdir);
+
+
+% =============================================================================
+%% LOCAL HELPER FUNCTIONS
+% =============================================================================
+
+function save_poster_fig(fig, path_no_ext)
+% Style (ticks outside, no top/right box) then export vector PDF + 300-dpi PNG.
+try
+    apply_fig_style(fig);
+catch
+    % apply_fig_style not on path: continue with default styling.
+end
+[d,~,~] = fileparts(path_no_ext);
+if ~isempty(d) && ~exist(d,'dir'), mkdir(d); end
+exportgraphics(fig, [path_no_ext '.pdf'], 'ContentType','vector');
+exportgraphics(fig, [path_no_ext '.png'], 'Resolution', 300);
+fprintf('  saved %s (.pdf/.png)\n', path_no_ext);
+end
+
+
+function out = load_first_var(paths, varname)
+% Return variable VARNAME from the first existing .mat that contains it.
+% Falls back to the first stored variable if VARNAME is absent. [] if none.
+out = [];
+for i = 1:numel(paths)
+    if exist(paths{i}, 'file')
+        S = load(paths{i});
+        if isfield(S, varname), out = S.(varname); return; end
+        fn = fieldnames(S);
+        if ~isempty(fn), out = S.(fn{1}); return; end
+    end
+end
+end
+
+
+function z = zscore_within(x, grp, subs)
+% Within-subject z-score of vector x given a string group label per row.
+x = double(x); z = nan(size(x));
+for s = 1:numel(subs)
+    m  = grp == subs(s);
+    v  = x(m);
+    sd = std(v, 'omitnan');
+    if sd > 0
+        z(m) = (v - mean(v,'omitnan')) / sd;
+    end
+end
+end
+
+
+function v = subject_means(T, col, mask, subs)
+% Per-subject mean of T.(col) over rows where mask is true (one value/subject).
+v = nan(numel(subs),1);
+x = double(T.(col));
+g = T.subj_id_s;
+for s = 1:numel(subs)
+    m = mask & g == subs(s);
+    if any(m), v(s) = mean(x(m), 'omitnan'); end
+end
+end
+
+
+function s = sem(v)
+% Standard error of the mean, ignoring NaN.
+v = v(~isnan(v));
+if isempty(v), s = 0; else, s = std(v) / sqrt(numel(v)); end
+end
+
+
+function gs = stage_sem(mat)
+% Per-column SEM across subjects (rows), ignoring NaN (matches S6).
+n  = sum(~isnan(mat), 1);
+gs = std(mat, 0, 1, 'omitnan') ./ sqrt(max(n, 1));
+end
+
+
+
+function lsline_safe(ax, x, y, clr, dispname)
+% Least-squares trend line over finite (x,y) pairs; needs >=2 distinct points.
+if nargin < 5, dispname = ''; end
+x = x(:); y = y(:);
+ok = isfinite(x) & isfinite(y);
+if nnz(ok) < 2 || numel(unique(x(ok))) < 2, return; end
+p  = polyfit(x(ok), y(ok), 1);
+xx = linspace(min(x(ok)), max(x(ok)), 50);
+if isempty(dispname)
+    plot(ax, xx, polyval(p,xx), '-', 'Color', clr, 'LineWidth', 1.5, 'HandleVisibility','off');
+else
+    plot(ax, xx, polyval(p,xx), '-', 'Color', clr, 'LineWidth', 2.0, 'DisplayName', dispname);
+end
+end
+
+
+function nc = next_trial_correct(T, subs)
+% Next-trial accuracy WITHIN the same subject and block (block boundaries
+% respected: the last trial of each block has no valid "next" -> NaN).
+nc = nan(height(T),1);
+g  = T.subj_id_s;
+b  = T.block_n;
+c  = T.correct_num;
+for s = 1:numel(subs)
+    blocks = unique(b(g==subs(s) & ~isnan(b)))';
+    for bb = blocks
+        idx = find(g==subs(s) & b==bb);
+        if numel(idx) < 2, continue; end
+        % assume rows are in trial order within a block
+        nc(idx(1:end-1)) = c(idx(2:end));
+    end
+end
+end
+
+
+function t = tercile_within(x, grp, subs)
+% Label each row 1/2/3 by within-subject tercile of x (NaN -> NaN).
+x = double(x); t = nan(size(x));
+for s = 1:numel(subs)
+    m = grp == subs(s) & ~isnan(x);
+    if nnz(m) < 3, continue; end
+    q = quantile(x(m), [1/3 2/3]);
+    xi = x(m); ti = ones(size(xi));
+    ti(xi > q(1)) = 2; ti(xi > q(2)) = 3;
+    t(m) = ti;
+end
+end
+
+
+function storyline_box(ax, lines)
+% Render a left-aligned multi-line text block in an (off) axes. Accepts a
+% cell array of lines; supports simple TeX (\bf \rm \it \bullet).
+axis(ax, 'off');
+text(ax, 0.01, 0.98, lines, 'Units','normalized', ...
+    'VerticalAlignment','top','HorizontalAlignment','left', ...
+    'FontSize', 10, 'Interpreter','tex');
+end
+
+
+function draw_task_schematic(ax, PAL)
+% Minimal task schematic: a row of interleaved D (certain) and P (uncertain)
+% blocks, each with a category switch (reversal) midway. Communicates the
+% design at a glance for the poster.
+axis(ax, 'off'); hold(ax, 'on');
+xlim(ax,[0 10]); ylim(ax,[0 3]);
+text(ax, 0, 2.8, '\bfTask\rm  interleaved certain (D) and uncertain (P) blocks; category switch mid-block', ...
+    'Units','data','FontSize',10,'Interpreter','tex','VerticalAlignment','top');
+
+order = {'D','P','D','P','P'};   % illustrative block order
+for i = 1:numel(order)
+    x0 = (i-1)*2 + 0.1;  w = 1.8;
+    if strcmp(order{i},'D'), c = PAL.D; else, c = PAL.P; end
+    rectangle(ax,'Position',[x0 1 w 0.8],'FaceColor',[c 0.35],'EdgeColor',c,'LineWidth',1.5);
+    text(ax, x0+w/2, 1.4, order{i}, 'HorizontalAlignment','center','Color',c,'FontWeight','bold');
+    % category switch marker midway through the block
+    xs = x0 + w/2;
+    plot(ax,[xs xs],[1 1.8],'k:','LineWidth',1);
+    plot(ax, xs, 0.7, 'v', 'MarkerFaceColor','k','MarkerEdgeColor','k','MarkerSize',5);
+end
+text(ax, 0.1, 0.45, '\downarrow = category switch (reversal)', 'FontSize',8,'Color',PAL.grey,'Interpreter','tex');
+text(ax, 5.2, 0.45, 'stages: LN \rightarrow LE \rightarrow RN \rightarrow RE', 'FontSize',8,'Color',PAL.grey,'Interpreter','tex');
+end
