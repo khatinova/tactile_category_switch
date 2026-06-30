@@ -179,7 +179,8 @@ fprintf('S7 complete.\n\n');
 %
 %  REQUIRES: EEGLAB on path + the epoched .set files in
 %            Epoched_data_noisefiltering/ (not just the feature table).
-%            KH cohort only (valid_participants edited inside S10).
+%            Both cohorts (KH Ox## + RR Nc##); participant lists and the
+%            per-cohort channel labels are set near the top of S10.
 %
 %  INPUT  : group_feature_table_combined.mat (from S4) + per-subject
 %           Ox##_outcome_trimmed.set epoch files

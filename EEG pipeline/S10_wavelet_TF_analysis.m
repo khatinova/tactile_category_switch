@@ -1,20 +1,34 @@
 % =============================================================================
-% S10_wavelet_TF_analysis.m  —  PIPELINE STEP 10 (optional, KH cohort)
+% S10_wavelet_TF_analysis.m  —  PIPELINE STEP 10 (optional)
 %
-% MORLET WAVELET TIME-FREQUENCY ANALYSIS
+% MORLET WAVELET TIME-FREQUENCY ANALYSIS  (BOTH cohorts: KH Ox## + RR Nc##)
 %
 % Computes event-related spectral perturbation (ERSP) and inter-trial
 % phase coherence (ITPC) for outcome-locked epochs using complex Morlet
 % wavelet convolution, then appends single-trial TF features to the SAME
 % combined feature table used by S7 (group_feature_table_combined.mat).
 %
+% COHORTS
+% -------
+%   Both KH (Ox##) and RR (Nc##) subjects are processed in one loop. Each
+%   cohort's epoched outcome .set files live under its own results tree
+%   (KH_epoch_folder / RR_epoch_folder), and the two EEG nets use different
+%   channel labels for the frontal midline / parietal ROIs:
+%       KH (Curry/ANT)        : FCz ; Pz/P1/P2
+%       RR (EGI 128 HydroCel) : E11 ; E62/E67/E72
+%   (RR labels match S2_RR / S3_RR.) subj_id alone selects cohort, folder,
+%   and channel set. Grand-average TF maps pool only subjects sharing the
+%   reference epoch time grid; single-trial features are extracted for every
+%   subject regardless.
+%
 % ALIGNED WITH S7
 % ---------------
 %   - Loads group_table from group_feature_table_combined.mat (from S4),
 %     using the same workspace-aware load guard as S7 (reuses gt/group_table
 %     if already in the workspace, otherwise loads from saved_tables_folder).
-%   - Uses the canonical column names: subj_id (e.g. "Ox03"), block_type,
-%     stage (ordinal LN/LE/RN/RE), correct (0/1), false_fb (logical), epoch.
+%   - Uses the canonical column names: subj_id (e.g. "Ox03"/"Nc07"),
+%     block_type, stage (ordinal LN/LE/RN/RE), correct (0/1),
+%     false_fb (logical), epoch.
 %   - Within-subject z-scored features carry the _z suffix, as in S7.
 %
 % WHAT THIS DOES:
@@ -69,7 +83,8 @@ addpath(genpath(fileparts(mfilename('fullpath'))));   % pipeline utils on path
 % -------------------------------------------------------------------------
 base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch';
 saved_tables_folder  = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Outcome_feature_tables_v4_merged');
-epoch_file_folder    = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Epoched_data_noisefiltering');
+KH_epoch_folder      = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Epoched_data_noisefiltering');
+RR_epoch_folder      = fullfile(base_path, 'Salient mod switch RR', 'Results', 'EEG analysis', 'Epoched_data_noisefiltering');
 figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', 'EEG analysis', 'Figures', 'TF_analysis');
 if ~exist(figure_output_folder,'dir'), mkdir(figure_output_folder); end
 
@@ -161,25 +176,42 @@ PLOT_WIN  = [-200 800];  % display window
 %   Minimum trials per condition to compute a meaningful TF map
 MIN_TRIALS = 10;
 
-%   Channel selection
-CHANNELS = struct( ...
-    'FCz',  {{'FCz'}}, ...
-    'Pz',   {{'Pz','P1','P2'}}, ...
-    'Acc',  {{'FCz','Fz','AFz'}} ...   % ACC/frontal ROI for theta
-);
-
 %   Stage and block info
 stage_names  = {'LN','LE','RN','RE'};
 BTYPE_LABELS = {'D','P'};
 STAGE_COLORS = [0.12 0.62 0.47; 0.85 0.65 0.00; 0.80 0.27 0.13; 0.40 0.25 0.65];
 
-valid_participants = [3:12, 14:23, 27:28];
+% -------------------------------------------------------------------------
+%% COHORT-AWARE PARTICIPANTS + CHANNEL LABELS
+%
+% Both cohorts are processed. They use DIFFERENT EEG nets, so the frontal
+% midline / parietal channel labels differ:
+%   KH (Curry/ANT)        : frontal midline = FCz, parietal = Pz/P1/P2
+%   RR (EGI 128 HydroCel) : frontal midline = E11, parietal = E62/E67/E72
+% (RR labels match S2_RR_preprocess_epoch_eeg.m / S3_RR_extract_eeg_features.m.)
+%
+% Each cohort's epoched outcome .set files live under its own results tree
+% (KH_epoch_folder / RR_epoch_folder, defined in PATHS above). The combined
+% feature table already carries both Ox## and Nc## rows with cohort-relative
+% epoch indices, so subj_id alone determines where to look.
+% -------------------------------------------------------------------------
+KH_PARTICIPANTS = [3:12, 14:23, 27:28];   % Ox## (KH)
+RR_PARTICIPANTS = 1:15;                    % Nc## (RR)
+
+KH_FCZ_LABELS = {'FCz'};            KH_PZ_LABELS = {'Pz','P1','P2'};
+RR_FCZ_LABELS = {'E11'};            RR_PZ_LABELS = {'E62','E67','E72'};
+
+% Combined, cohort-prefixed subject list driving the participant loop.
+ALL_SUBJECTS = [compose("Ox%02d", KH_PARTICIPANTS(:)); ...
+                compose("Nc%02d", RR_PARTICIPANTS(:))];
 
 % -------------------------------------------------------------------------
 %% INITIALISE GRAND-AVERAGE TF CONTAINERS
 %
-% Each leaf stores: .ersp (n_subj x n_freq x n_time) and .subj (n_subj x 1)
-% for the FCz channel. This enables sub-group re-plotting.
+% Each leaf stores: .ersp (n_subj x n_freq x n_time) and .subj (string ids)
+% for the FCz channel. .subj holds the canonical subj_id string ("Ox03" /
+% "Nc07") — NOT the numeric participant number — so KH and RR subjects with
+% the same number never collide in the cross-subject grand averages / stats.
 % -------------------------------------------------------------------------
 for s = 1:4
     for bt = 1:2
@@ -187,7 +219,7 @@ for s = 1:4
         for oc = {'correct','incorrect'}
             grand_tf.FCz.(stage_names{s}).(bt_s).(oc{1}).ersp = [];
             grand_tf.FCz.(stage_names{s}).(bt_s).(oc{1}).itpc = [];
-            grand_tf.FCz.(stage_names{s}).(bt_s).(oc{1}).subj = [];
+            grand_tf.FCz.(stage_names{s}).(bt_s).(oc{1}).subj = strings(0,1);
         end
     end
 end
@@ -204,24 +236,51 @@ group_table.theta_itpc = nan(n_rows,1);
 t_global = [];   % time axis, filled from first loaded subject
 
 % =========================================================================
-%% PARTICIPANT LOOP
+%% PARTICIPANT LOOP  (KH Ox## + RR Nc##)
 % =========================================================================
-for participant = valid_participants
+for sidx = 1:numel(ALL_SUBJECTS)
 
-    subj      = sprintf('Ox%02d', participant);          % canonical subj_id label
-    subj_rows = group_table.subj_id == subj;
-    fprintf('\n=== %s ===\n', subj);
-
-    % Load broadband and (optionally) phase .set files
-    fname = sprintf('%s_outcome_trimmed.set', subj);
-    if ~exist(fullfile(epoch_file_folder, fname),'file')
-        warning('%s: file not found, skipping.', subj); continue
+    subj = char(ALL_SUBJECTS(sidx));            % canonical subj_id ("Ox03"/"Nc07")
+    if startsWith(subj, 'Ox')
+        cohort = 'KH'; epoch_folder = KH_epoch_folder;
+        fcz_labels = KH_FCZ_LABELS; pz_labels = KH_PZ_LABELS;
+    else
+        cohort = 'RR'; epoch_folder = RR_epoch_folder;
+        fcz_labels = RR_FCZ_LABELS; pz_labels = RR_PZ_LABELS;
     end
-    EEGp = pop_loadset(fname, epoch_file_folder);
+    participant = str2double(regexp(subj, '\d+', 'match', 'once'));
+    subj_rows   = group_table.subj_id == subj;
+    fprintf('\n=== %s (%s) ===\n', subj, cohort);
+
+    if ~any(subj_rows)
+        fprintf('  no rows in group_table for %s, skipping.\n', subj); continue
+    end
+
+    % Locate outcome .set: prefer the trimmed file, fall back to untrimmed.
+    fname = '';
+    if     exist(fullfile(epoch_folder, sprintf('%s_outcome_trimmed.set', subj)),'file')
+        fname = sprintf('%s_outcome_trimmed.set', subj);
+    elseif exist(fullfile(epoch_folder, sprintf('%s_outcome.set', subj)),'file')
+        fname = sprintf('%s_outcome.set', subj);
+    end
+    if isempty(fname)
+        warning('%s: no outcome .set found in %s, skipping.', subj, epoch_folder); continue
+    end
+    EEGp = pop_loadset(fname, epoch_folder);
     fprintf('  Loaded %d epochs, %d channels, Fs=%d Hz\n', ...
         EEGp.trials, EEGp.nbchan, EEGp.srate);
 
     if isempty(t_global), t_global = EEGp.times; end
+
+    % Subjects whose epoch time grid matches the reference can contribute to
+    % the cross-subject grand-average TF maps; mismatched grids still get
+    % single-trial features (STEP 1b) but are excluded from grand averages.
+    grid_ok = (numel(EEGp.times) == numel(t_global));
+    if ~grid_ok
+        warning(['%s: epoch time-axis length %d ~= reference %d; excluded from ' ...
+            'grand-average TF maps (single-trial features still computed).'], ...
+            subj, numel(EEGp.times), numel(t_global));
+    end
 
     % Time masks
     bl_mask   = EEGp.times >= BL_WIN(1)   & EEGp.times <= BL_WIN(2);
@@ -230,10 +289,9 @@ for participant = valid_participants
     beta_mask = EEGp.times >= BETA_WIN(1) & EEGp.times <= BETA_WIN(2);
     plot_mask = EEGp.times >= PLOT_WIN(1) & EEGp.times <= PLOT_WIN(2);
 
-    % Channel indices
-    fcz_idx = safe_chan(EEGp, CHANNELS.FCz);
-    pz_idx  = safe_chan(EEGp, CHANNELS.Pz);
-    acc_idx = safe_chan(EEGp, CHANNELS.Acc); %#ok<NASGU>
+    % Channel indices (cohort-specific labels)
+    fcz_idx = safe_chan(EEGp, fcz_labels);
+    pz_idx  = safe_chan(EEGp, pz_labels);
 
     % ------------------------------------------------------------------
     % STEP 1: COMPUTE MORLET WAVELET TRANSFORM FOR ALL EPOCHS
@@ -357,10 +415,14 @@ for participant = valid_participants
                     itpc = abs(mean(exp(1i * cond_phase), 3, 'omitnan'));
                     % itpc: N_FREQS x n_times
 
-                    %% --- Accumulate grand average ---
-                    grand_tf.FCz.(stage_names{s_i}).(bt).(oc_str).ersp(end+1,:,:) = ersp;
-                    grand_tf.FCz.(stage_names{s_i}).(bt).(oc_str).itpc(end+1,:,:) = itpc;
-                    grand_tf.FCz.(stage_names{s_i}).(bt).(oc_str).subj(end+1)     = participant;
+                    %% --- Accumulate grand average (common time grid only) ---
+                    % .subj stores the canonical subj_id STRING so KH/RR
+                    % subjects with the same number never collide.
+                    if grid_ok
+                        grand_tf.FCz.(stage_names{s_i}).(bt).(oc_str).ersp(end+1,:,:) = ersp;
+                        grand_tf.FCz.(stage_names{s_i}).(bt).(oc_str).itpc(end+1,:,:) = itpc;
+                        grand_tf.FCz.(stage_names{s_i}).(bt).(oc_str).subj(end+1)     = string(subj);
+                    end
 
                     %% --- Cell-level ITPC feature ---
                     % ITPC is computed ACROSS the trials of this cell, so it
@@ -385,7 +447,7 @@ for participant = valid_participants
     % correct and incorrect overlaid on same colorscale for comparison.
     % Bottom row: ITPC.
     % ------------------------------------------------------------------
-    if ~isempty(tf_power_fcz)
+    if ~isempty(tf_power_fcz) && grid_ok
         plot_subject_tf(subj, participant, has_P, group_table, subj_rows, ...
             tf_power_fcz, tf_phase_fcz, tf_power_pz, ...
             frex, t_global, bl_mask, plot_mask, ...
@@ -771,7 +833,8 @@ end
 fprintf('  Difference-figure n (subjects with >= %d true-FB trials in the cell):\n', MIN_TRIALS_DIFF);
 fprintf('    D: Correct=%d, Incorrect=%d | P: Correct=%d, Incorrect=%d\n', ...
     sum(~isnan(thD_c)), sum(~isnan(thD_i)), sum(~isnan(thP_c)), sum(~isnan(thP_i)));
-fprintf('    NOTE: wavelet loop processed %d KH participants (valid_participants);\n', numel(valid_participants));
+fprintf('    NOTE: wavelet loop attempted %d KH + %d RR participants;\n', ...
+    numel(KH_PARTICIPANTS), numel(RR_PARTICIPANTS));
 fprintf('          combined table has %d subjects. Each contrast is PAIRED, so n is\n', nS);
 fprintf('          the subjects with data in BOTH of its conditions; sparse incorrect\n');
 fprintf('          cells (esp. deterministic blocks) are the main limiter.\n');
@@ -807,10 +870,10 @@ paired_theta_panel(ax4, thP_i, thD_i, 'P','D', CLR_P, CLR_D, ...
 
 annotation(fig_thdiff,'textbox',[0.01 0.005 0.98 0.05],'String', ...
     sprintf(['n = subjects with >= %d true-feedback trials in BOTH conditions of the contrast ' ...
-    '(per-subject means, collapsed across stages). The wavelet loop processed %d KH datasets; ' ...
+    '(per-subject means, collapsed across stages). The wavelet loop processed %d KH + %d RR datasets; ' ...
     'paired incorrect-trial cells (especially in deterministic blocks) are the main reason n is ' ...
     'smaller than the total number of datasets. Significance bar: * p<.05, ** p<.01, *** p<.001 (paired t-test).'], ...
-    MIN_TRIALS_DIFF, numel(valid_participants)), ...
+    MIN_TRIALS_DIFF, numel(KH_PARTICIPANTS), numel(RR_PARTICIPANTS)), ...
     'FontSize',7,'EdgeColor','none','BackgroundColor',[0.95 0.95 0.95]);
 
 saveas(fig_thdiff, fullfile(figure_output_folder,'S10_TF_theta_difference.pdf'));
