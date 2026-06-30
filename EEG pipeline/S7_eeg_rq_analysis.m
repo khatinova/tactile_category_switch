@@ -1,27 +1,86 @@
 % =============================================================================
-% S7_eeg_rq_analysis.m  — PIPELINE STEP 7 of 7 (canonical)
+% S7_eeg_rq_analysis.m  —  PIPELINE STEP 7 of 7 (canonical)
 %
-% Canonical version: consolidated from S7_eeg_rq_analysis.m,
-% S7_flexible_plot_scale, S7c_transitions, S7d_no_line_options,
-% S7d_sigstars, S7d_sigstars_RQ2extended, and S7d_sigstars_prefrontal_mean.
-% Supersedes all those files.
+% Canonical version: consolidated from S7d_eeg_rq_analysis_no_line_options_sigstars_RQ2theta_simple.m
+% Supersedes all S7 / S7c / S7d variants.
 %
 % Key settings at the top of the script:
 %   PLOT_SCALE  — 'z' | 'norm' | 'raw'  (controls figure y-axes only)
 %
-% BUGS FIXED vs original (9 fixes — see inline comments):
-%   1. gt_plv.trueFB == 1 → ~gt_plv.false_fb
-%   2. next_correct crossed block boundaries → nested per-block loop
-%   3. categorical() comparison in plot_stage_bar → string comparison
-%   4. plot_lme_effects with numeric correct → categorical with labels
-%   5. prefrontal_mean_norm not in z-score list → added + used _z version
-%   6. ttest2 (independent) → ttest (paired) in plot_lme_effects
-%   7. false_fb as continuous predictor → cast to categorical first
-%   8. PLV_z row misalignment after stacking → conditional fill after stack
-%   9. (1+stage|subj_id) random slope → (1|subj_id)+(1|subj_id:stage)
+% BUGS FIXED vs original (all 9 fixes — see inline comments):
+%
+%  BUG 1 — gt_plv.trueFB == 1 (line ~RQ4)
+%     The group_table has no column called 'trueFB'. The stage_table pipeline
+%     stores feedback validity as 'false_fb' (logical, true = feedback was
+%     flipped). Using gt_plv.trueFB == 1 silently creates an all-zero vector
+%     (MATLAB returns [] or zeros for missing struct fields accessed this way
+%     on a table), filtering out ALL rows.
+%     FIX: ~gt_plv.false_fb
+%
+%  BUG 2 — next_correct computation ignores block boundaries (RQ4)
+%     The original code assigns next_correct by taking consecutive rows
+%     within a subject across the whole table, so the last trial of block 1
+%     gets next_correct = first trial of block 2. That is a different block
+%     with a different stimulus set and reversal — the "next trial correct"
+%     has no meaningful continuity there.
+%     FIX: nest the loop inside a per-block inner loop.
+%
+%  BUG 3 — categorical comparison in plot_stage_bar
+%     categorical({bts{bt_i}}) creates a 1×1 categorical cell array, not a
+%     scalar categorical. The == comparison against a column categorical may
+%     silently fail or produce incorrect logical indexing.
+%     FIX: compare directly as string: gt_sub.block_type == bts{bt_i}
+%
+%  BUG 4 — plot_lme_effects called with yvar='correct' (numeric 0/1)
+%     The function calls categories(gt.(yvar)) which works only on categorical
+%     arrays. If correct is still numeric, this errors. If already converted
+%     to categorical it labels groups '0'/'1' which are opaque in figures.
+%     FIX: convert correct to categorical with explicit labels inside the
+%     function; use 'Incorrect'/'Correct' as display names.
+%
+%  BUG 5 — prefrontal_neg_peak_norm used in models but NOT in z-score list
+%     The z-score loop processes FCz_neg_peak_amp (raw µV) but the models
+%     use FCz_neg_peak_norm (baseline-RMS-normalised). That column is on a
+%     completely different scale from the z-scored columns used in the same
+%     models. Both should either be z-scored or neither.
+%     FIX: add FCz_neg_peak_norm to the z-score list and use the _z version
+%     in all models for consistency. The baseline-RMS normalised value is
+%     already interpretable as "signal / noise" but it still has
+%     between-subject variance in scale.
+%
+%  BUG 6 — plot_lme_effects uses ttest2 (independent samples) to annotate
+%     p-values comparing two groups within an x-level. Because the same
+%     subject appears in both D and P block columns, the correct test is
+%     ttest (paired), not ttest2.
+%     FIX: match subjects and use ttest on paired differences.
+%
+%  BUG 7 — mdl_false_fn uses false_fb (logical) as a continuous predictor
+%     in fitlme. MATLAB's fitlme will treat logicals as doubles (0/1), which
+%     is correct numerically, but the interaction conf_z * false_fb will test
+%     whether the slope of confidence on FRN differs between true and false
+%     trials. This is actually the intended test but false_fb should be cast
+%     to categorical so coefficients are labelled clearly.
+%     FIX: cast to categorical before model call.
+%
+%  BUG 8 — PLV_z assignment in plv_long may misalign rows
+%     plv_long = [gt_plv; gt_fs] stacks the rows. When gt_plv and gt_fs
+%     differ in height (different subjects passed the MIN_TRIALS_PLV filter
+%     for fp vs fs), the assignment plv_long.PLV_z = [gt_plv.PLV_fp_z;
+%     gt_fs.PLV_fs_z] will error or silently mismatch if any rows with
+%     NaN PLV were dropped differently between the two tables.
+%     FIX: keep all rows and fill PLV_z conditionally after stacking.
+%
+%  BUG 9 — randon effects formula `(1 + stage | subj_id)` with ordinal stage
+%     stage is set as ordinal categorical with 4 levels. A random slope over
+%     an ordinal predictor requires MATLAB to dummy-code it (3 contrasts).
+%     A random slope for 3 dummy variables with a small n (~30 subjects)
+%     will not converge. This will produce a singular fit warning and
+%     unreliable variance estimates.
+%     FIX: Use (1 | subj_id) + (1 | subj_id:stage) crossed random effects,
+%     which is equivalent but more stable; or drop the random slope for stage.
 %
 % =============================================================================
-
+close all
 % ── PIPELINE STEP 7 of 7 — 5-RQ EEG analysis (S7_eeg_rq_analysis.m) ─────────
 % (was: Stats_Uncertainty_Analysis_EEG_combined_FRN_negpeak_v2.m)
 %
@@ -50,9 +109,9 @@ figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', '
 %   'z'    = within-subject z-scored values. Good for combining subjects and
 %            comparing effect directions, but less directly interpretable.
 %   'norm' = baseline-RMS-normalised values where available, e.g.
-%            prefrontal_mean_norm, P300_norm. Better for physiology plots.
+%            prefrontal_neg_peak_norm, P300_norm. Better for physiology plots.
 %   'raw'  = raw amplitude / raw feature values where available, e.g.
-%            prefrontal_mean_amp, P300_amp. Most interpretable units,
+%            prefrontal_neg_peak_amp, P300_amp. Most interpretable units,
 %            but most sensitive to between-subject scale differences.
 %
 % Recommendation: use PLOT_SCALE='norm' for main EEG amplitude figures and
@@ -63,12 +122,13 @@ figure_output_folder = fullfile(figure_output_folder, ['S7_plot_' PLOT_SCALE]);
 if ~exist(figure_output_folder, 'dir'), mkdir(figure_output_folder); end
 
 % Load the combined KH+RR feature table (from S4) unless already in workspace.
-% (S7b calls clear at the top, so group_table will not persist from S7b's run.
-%  This guard loads the file only when the variable is absent.)
-if ~exist('group_table', 'var')
+% S7b loads the table as 'gt'; this block handles both cases so S7 works
+% whether run standalone, after S7b, or with group_table already loaded.
+if exist('gt', 'var') && ~exist('group_table', 'var')
+    group_table = gt;   % use table left in workspace by S7b
+elseif ~exist('group_table', 'var')
     load(fullfile(saved_tables_folder, 'group_feature_table_combined.mat'), 'group_table');
 end
-
 
 % Figure styling defaults (ticks outside, no top/right box) applied to every
 % axes created below; matches pipeline/utils/apply_fig_style.
@@ -95,7 +155,7 @@ group_table.stimulus_modality = categorical(group_table.stimulus_modality);
 group_table.practice_task     = categorical(group_table.practice_task);
 
 % ─── FIX 5: extend z-score list to include FCz_neg_peak_norm ────────────────
-features_to_zscore = {'prefrontal_mean_amp','prefrontal_mean_norm', ...
+features_to_zscore = {'prefrontal_neg_peak_amp','prefrontal_neg_peak_norm', ...
                       'FRN_amp','prefrontalFRN_norm','RewP_amp','RewP_norm', ...
                       'P300_amp','P300_norm','Theta_amp', ...
                       'PLV_fp','PLV_fs','PLV_fp_pairwise','PLV_fs_pairwise'};
@@ -121,7 +181,7 @@ gt = group_table;   % working copy
 
 % Resolve plot variables from PLOT_SCALE. These names are used only for
 % figures. Model formulae continue to use *_z variables below.
-[FN_PLOT,    FN_YLBL,    FN_REVERSE_Y]    = resolve_plot_feature(gt, 'prefrontal_mean', PLOT_SCALE);
+[FN_PLOT,    FN_YLBL,    FN_REVERSE_Y]    = resolve_plot_feature(gt, 'prefrontal_neg_peak', PLOT_SCALE);
 [P300_PLOT,  P300_YLBL,  P300_REVERSE_Y]  = resolve_plot_feature(gt, 'P300', PLOT_SCALE);
 [THETA_PLOT, THETA_YLBL, THETA_REVERSE_Y] = resolve_plot_feature(gt, 'Theta', PLOT_SCALE);
 [PLVFP_PLOT, PLVFP_YLBL, PLVFP_REVERSE_Y] = resolve_plot_feature(gt, 'PLV_fp', PLOT_SCALE);
@@ -151,12 +211,12 @@ fprintf('\n\n=== STATISTICAL MODELS ===\n\n');
 fprintf('--- RQ1: Feedback negativity and P300 under uncertainty ---\n');
 
 gt_true = gt(~gt.false_fb & ...
-              ~isnan(gt.prefrontal_mean_norm_z) & ...    % FIX 5: use _z version
+              ~isnan(gt.prefrontal_neg_peak_norm_z) & ...    % FIX 5: use _z version
               ~isnan(gt.P300_amp_z), :);
 
 % FIX 9: stable random effects — per-subject intercept only for stage
 mdl_fn_rq1 = fitlme(gt_true, ...
-    ['prefrontal_mean_norm_z ~ block_type * correct + stage + ' ...
+    ['prefrontal_neg_peak_norm_z ~ block_type * correct + stage + ' ...
      '(1 + block_type | subj_id)'], ...
     'FitMethod','REML');
 fprintf('  FN model:\n'); disp(mdl_fn_rq1.Coefficients);
@@ -205,7 +265,7 @@ plot_stage_transition_feedback(gt, P300_PLOT, ...
 fprintf('\n--- RQ2: Confidence × Feedback negativity × block_type ---\n');
 
 gt_inc = gt(...%gt.correct==0 & ~gt.false_fb & ...
-             ~isnan(gt.confidence) & ~isnan(gt.prefrontal_mean_norm_z), :);
+             ~isnan(gt.confidence) & ~isnan(gt.prefrontal_neg_peak_norm_z), :);
 
 % Z-score confidence within subject
 gt_inc.conf_z = nan(height(gt_inc), 1);
@@ -218,7 +278,7 @@ for si = 1:numel(subj_list)
 end
 
 mdl_fn_conf = fitlme(gt_inc, ...
-    ['prefrontal_mean_norm_z ~ conf_z * block_type + stage + ' ...
+    ['prefrontal_neg_peak_norm_z ~ conf_z * block_type + stage + ' ...
      '(1 + conf_z | subj_id)'], ...
     'FitMethod','REML');
 fprintf('  FRN ~ confidence × block_type (incorrect trials only):\n');
@@ -226,9 +286,9 @@ disp(mdl_fn_conf.Coefficients);
 
 % False feedback analysis (P blocks: does perceived vs true feedback matter?)
 gt_p = gt(gt.block_type=='P' & ...
-           ~isnan(gt.prefrontal_mean_norm_z) & ~isnan(gt.confidence), :);
+           ~isnan(gt.prefrontal_neg_peak_norm_z) & ~isnan(gt.confidence), :);
 gt_p.conf_z    = nan(height(gt_p), 1);
-gt_p.false_fb_cat = categorical(double(gt_p.false_fb), [0 1], {'TrueFB','FalseFB'}); % FIX 7
+gt_p.false_fb = categorical(double(gt_p.false_fb), [0 1], {'TrueFB','FalseFB'}); % false_fb kept as the variable name
 
 for si = 1:numel(subj_list)
     mask = gt_p.subj_id == subj_list(si);
@@ -240,21 +300,22 @@ end
 
 if height(gt_p) > 10
     mdl_false_fn = fitlme(gt_p, ...
-        ['prefrontal_mean_norm_z ~ conf_z * false_fb + stage + ' ...
+        ['prefrontal_neg_peak_norm_z ~ conf_z * trueFB + stage + ' ...
          '(1 | subj_id)'], ...
         'FitMethod','REML');
-    fprintf('  FRN ~ confidence × false_fb (P blocks only):\n');
+    fprintf('  FRN ~ confidence × trueFB (P blocks only):\n');
     disp(mdl_false_fn.Coefficients);
 else
     mdl_false_fn = [];
     warning('Too few P-block rows for false_fb model.');
 end
 
-% Expanded RQ2 visualisation suite: confidence, false feedback, RW value, RW PE.
-% Models use prefrontal_mean_norm_z for significance annotations; plots use
-% the selected FN_PLOT variable so PLOT_SCALE remains respected.
-plot_confidence_fRN_extended(gt, gt_inc, gt_p, figure_output_folder, ...
-    FN_PLOT, FN_YLBL, FN_REVERSE_Y);
+% Simplified RQ2 visualisation suite: confidence, false feedback, RW value, RW PE,
+% plus prior-uncertainty moderators. Models use prefrontal_neg_peak_norm_z for
+% significance annotations; plots use the selected FN_PLOT variable so PLOT_SCALE
+% remains respected. Each figure prints its exact LME formula.
+plot_component_predictor_suite_simple_s7d(gt, figure_output_folder, ...
+    'FN', FN_PLOT, 'prefrontal_neg_peak_norm_z', FN_YLBL, FN_REVERSE_Y);
 
 
 % =========================================================================
@@ -273,6 +334,11 @@ fprintf('  Theta model:\n'); disp(mdl_theta.Coefficients);
 
 plot_stage_bar(gt_th, THETA_PLOT, [THETA_YLBL ' (incorrect trials)'], ...
     'RQ3: Stage × Block type — Frontal theta', figure_output_folder, 'RQ3_Theta', THETA_REVERSE_Y);
+
+% Simplified theta analogue of RQ2: confidence, false feedback, RW value, RW PE,
+% plus prior-uncertainty moderators. Each figure prints its exact LME formula.
+plot_component_predictor_suite_simple_s7d(gt, figure_output_folder, ...
+    'Theta', THETA_PLOT, 'Theta_amp_z', THETA_YLBL, THETA_REVERSE_Y);
 
 
 % =========================================================================
@@ -1668,18 +1734,18 @@ end
 % =========================================================================
 function [feat, ylbl, reverse_y] = resolve_plot_feature(T, measure_key, plot_scale)
 %RESOLVE_PLOT_FEATURE  Return a valid feature column for plotting.
-% measure_key options used here: prefrontal_mean, P300, Theta, PLV_fp, PLV_fs.
+% measure_key options used here: prefrontal_neg_peak, P300, Theta, PLV_fp, PLV_fs.
 % reverse_y is true only for negative-going frontocentral amplitude plots.
 
 plot_scale = lower(string(plot_scale));
 reverse_y = false;
 
 switch char(measure_key)
-    case 'prefrontal_mean'
+    case 'prefrontal_neg_peak'
         reverse_y = true;  % more negative = larger frontocentral negativity
-        raw_col  = 'prefrontal_mean_amp';
-        norm_col = 'prefrontal_mean_norm';
-        z_col    = 'prefrontal_mean_norm_z';
+        raw_col  = 'prefrontal_neg_peak_amp';
+        norm_col = 'prefrontal_neg_peak_norm';
+        z_col    = 'prefrontal_neg_peak_norm_z';
         raw_lbl  = 'Prefrontal negative peak (uV; more negative = larger FN)';
         norm_lbl = 'Prefrontal negative peak / baseline RMS (more negative = larger FN)';
         z_lbl    = 'Prefrontal negative peak (within-subject z; more negative = larger FN)';
@@ -1949,16 +2015,16 @@ function plot_confidence_fRN_extended(gt, gt_inc, gt_p, outdir, fn_feat, fn_ylbl
 % Significance annotations are LME-based, not raw correlations. The displayed
 % y-variable follows PLOT_SCALE (fn_feat), while model stars use the z-scored
 % prefrontal negativity column for consistency with the rest of S7.
-if nargin < 5 || isempty(fn_feat), fn_feat = 'prefrontal_mean_norm_z'; end
+if nargin < 5 || isempty(fn_feat), fn_feat = 'prefrontal_neg_peak_norm_z'; end
 if nargin < 6 || isempty(fn_ylbl), fn_ylbl = 'Feedback negativity'; end
 if nargin < 7 || isempty(reverse_y), reverse_y = false; end
 
 if ~ismember(fn_feat, gt.Properties.VariableNames)
-    warning('S7d RQ2: plot variable %s missing. Falling back to prefrontal_mean_norm_z.', fn_feat);
-    fn_feat = 'prefrontal_mean_norm_z';
+    warning('S7d RQ2: plot variable %s missing. Falling back to prefrontal_neg_peak_norm_z.', fn_feat);
+    fn_feat = 'prefrontal_neg_peak_norm_z';
     fn_ylbl = 'Feedback negativity (z)';
 end
-model_y = 'prefrontal_mean_norm_z';
+model_y = 'prefrontal_neg_peak_norm_z';
 if ~ismember(model_y, gt.Properties.VariableNames)
     model_y = fn_feat;
 end
@@ -1983,8 +2049,8 @@ sgtitle({'RQ2: Confidence × prefrontal negativity', ...
 
 for ri = 1:3
     T = Tset{ri};
-    sig_line = rq2_fit_and_sigline(T, model_y, 'conf_z * block_type + stage + (stage | subj_id)', ...
-        {'conf_z','conf_z:block_type'}, {'conf','conf×block'})
+    sig_line = rq2_fit_and_sigline(T, model_y, 'conf_z * block_type + stage + (1 | subj_id)', ...
+        {'conf_z','conf_z:block_type'}, {'conf','conf×block'});
     for bi = 1:2
         bt = {'D','P'};
         ax = subplot(3,2,(ri-1)*2+bi); hold(ax,'on');
@@ -1997,7 +2063,7 @@ for ri = 1:3
         axis(ax,'square');
     end
     try
-        writetable(rq2_lme_table(T, model_y, 'conf_z * block_type + stage + (stage| subj_id)'), ...
+        writetable(rq2_lme_table(T, model_y, 'conf_z * block_type + stage + (1 | subj_id)'), ...
             fullfile(rq2_dir, sprintf('RQ2_confidence_%s_LME_coefficients.csv', file_lbl{ri})));
     catch
     end
@@ -2010,11 +2076,11 @@ exportgraphics(figA, fullfile(rq2_dir, 'RQ2A_FN_confidence_all_incorrect_correct
 % -------------------------------------------------------------------------
 if ~isempty(gt_p) && height(gt_p) > 10
     Tp = rq2_prepare_predictor_table(gt_p, 'confidence', fn_feat, model_y);
-    Tp.false_fb_cat = categorical(double(Tp.false_fb), [0 1], {'TrueFB','FalseFB'});
+    Tp.false_fb = categorical(double(Tp.false_fb), [0 1], {'TrueFB','FalseFB'});
     Tp.correct_cat  = categorical(double(Tp.correct_num), [0 1], {'Incorrect','Correct'});
     sig_false = rq2_fit_and_sigline(Tp, model_y, ...
-        'conf_z * false_fb * correct_cat + stage + (stage | subj_id)', ...
-        {'conf_z','conf_z:false_fb_cat','conf_z:correct_cat','conf_z:false_fb_cat:correct_cat'}, ...
+        'conf_z * false_fb * correct_cat + stage + (1 | subj_id)', ...
+        {'conf_z','conf_z:false_fb','conf_z:correct_cat','conf_z:false_fb:correct_cat'}, ...
         {'conf','conf×falseFB','conf×outcome','3-way'});
 
     figB = figure('Position',[60 60 1050 760]);
@@ -2027,7 +2093,7 @@ if ~isempty(gt_p) && height(gt_p) > 10
         for fi = 1:2
             ax = subplot(2,2,(oi-1)*2+fi); hold(ax,'on');
             title(ax, sprintf('%s | %s', outcomes{oi}, fblabs{fi}), 'FontSize',10);
-            mask = Tp.correct_cat == outcomes{oi} & Tp.false_fb_cat == fblabs{fi};
+            mask = Tp.correct_cat == outcomes{oi} & Tp.false_fb == fblabs{fi};
             rq2_binned_scatter_no_line(ax, Tp.conf_z(mask), Tp.y_plot(mask), fbcols{fi}, ...
                 'Confidence (within-subject z)', fn_ylbl);
             add_lme_sig_text_local(ax, sig_false);
@@ -2036,7 +2102,7 @@ if ~isempty(gt_p) && height(gt_p) > 10
         end
     end
     try
-        writetable(rq2_lme_table(Tp, model_y, 'conf_z * false_fb_cat * correct_cat + stage + (1 | subj_id)'), ...
+        writetable(rq2_lme_table(Tp, model_y, 'conf_z * false_fb * correct_cat + stage + (1 | subj_id)'), ...
             fullfile(rq2_dir, 'RQ2_false_feedback_confidence_LME_coefficients.csv'));
     catch
     end
@@ -2068,7 +2134,7 @@ else
         Tpred = rq2_prepare_predictor_table(gt, pred_col, fn_feat, model_y);
         Tpred.correct_cat = categorical(double(Tpred.correct_num), [0 1], {'Incorrect','Correct'});
         sig_pred = rq2_fit_and_sigline(Tpred, model_y, ...
-            'pred_z * correct_cat + block_type + stage + (stage | subj_id)', ...
+            'pred_z * correct_cat + block_type + stage + (1 | subj_id)', ...
             {'pred_z','pred_z:correct_cat'}, {pred_lbl,[pred_lbl '×outcome']});
         for oi = 1:3
             ax = subplot(size(pred_specs,1),3,(pi-1)*3+oi); hold(ax,'on');
@@ -2202,7 +2268,7 @@ try
     if height(Tm) < 10
         sig_line = 'LME: too few rows'; return;
     end
-    mdl = fitlme(Tm, ['y_model ~ ' formula_rhs], 'FitMethod','REML')
+    mdl = fitlme(Tm, ['y_model ~ ' formula_rhs], 'FitMethod','REML');
     C = mdl.Coefficients;
     bits = strings(1,numel(terms));
     for ii = 1:numel(terms)
@@ -2272,9 +2338,330 @@ for c = pe_candidates
 end
 end
 
+
+function plot_component_predictor_suite_simple_s7d(gt, outdir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y)
+%PLOT_COMPONENT_PREDICTOR_SUITE_SIMPLE_S7D
+% Simpler predictor suite for FN and theta.
+% Produces compact no-line plots where each figure prints its exact LME formula.
+% Figures:
+%   A confidence relationship, no stage split
+%   B confidence relationship split by stage
+%   C P-block false-feedback relationship, split by outcome and false_fb
+%   D RW value / PE relationship, if columns exist
+%   E prior uncertainty moderation of the confidence relationship by transition
+%   F prior uncertainty moderation of the confidence relationship by n_prev_P
+if nargin < 7 || isempty(reverse_y), reverse_y = false; end
+if ~ismember(y_plot_col, gt.Properties.VariableNames)
+    warning('%s simple suite skipped: missing plot column %s.', comp_tag, y_plot_col);
+    return;
+end
+if ~ismember(y_model_col, gt.Properties.VariableNames)
+    warning('%s simple suite: missing model column %s; using plot column for models.', comp_tag, y_model_col);
+    y_model_col = y_plot_col;
+end
+suite_dir = fullfile(outdir, ['SimplePredictorSuite_' matlab.lang.makeValidName(comp_tag)]);
+if ~exist(suite_dir,'dir'), mkdir(suite_dir); end
+
+% Common predictors: confidence always, RW value / PE when present.
+rw_specs = rq2_find_rw_predictors(gt);
+pred_specs = {'confidence','Confidence'};
+if ~isempty(rw_specs)
+    pred_specs = [pred_specs; rw_specs];
+end
+
+% A/B/C always use confidence.
+plot_simple_relationship_by_outcome_s7d(gt, suite_dir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, 'confidence', 'Confidence');
+plot_simple_relationship_by_stage_s7d(gt, suite_dir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, 'confidence', 'Confidence');
+plot_simple_false_feedback_s7d(gt, suite_dir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, 'confidence', 'Confidence');
+
+% RW value and PE.
+if size(pred_specs,1) > 1
+    for pi = 2:size(pred_specs,1)
+        plot_simple_relationship_by_outcome_s7d(gt, suite_dir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, pred_specs{pi,1}, pred_specs{pi,2});
+        plot_simple_relationship_by_stage_s7d(gt, suite_dir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, pred_specs{pi,1}, pred_specs{pi,2});
+    end
+else
+    fig = figure('Position',[80 80 850 260]); axis off;
+    text(0.5,0.55,{sprintf('%s: RW value / PE columns not found.', comp_tag), ...
+        'Expected common names include value, Value, rw_value, PE, pe, prediction_error, rw_PE.'}, ...
+        'HorizontalAlignment','center','FontSize',11);
+    exportgraphics(fig, fullfile(suite_dir, sprintf('%s_RW_value_PE_missing.pdf', comp_tag)), 'ContentType','vector');
+end
+
+% Prior uncertainty moderation of confidence relationship.
+plot_simple_prior_moderator_s7d(gt, suite_dir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, 'confidence', 'Confidence', 'transition');
+plot_simple_prior_moderator_s7d(gt, suite_dir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, 'confidence', 'Confidence', 'nprevP');
+
+fprintf('%s simplified predictor plots saved to:\n  %s\n', comp_tag, suite_dir);
+end
+
+function plot_simple_relationship_by_outcome_s7d(gt, outdir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, pred_col, pred_lbl)
+% One simple figure: all, incorrect, correct. No stage split.
+try
+    T = simple_prepare_predictor_table_s7d(gt, pred_col, y_plot_col, y_model_col);
+catch ME
+    warning('%s %s outcome plot skipped: %s', comp_tag, pred_lbl, ME.message); return;
+end
+if height(T) < 12, return; end
+T.correct_cat = categorical(double(T.correct_num), [0 1], {'Incorrect','Correct'});
+formula_all = 'y_model ~ pred_z * correct_cat + block_type + (1|subj_id)';
+formula_sub = 'y_model ~ pred_z + block_type + (1|subj_id)';
+
+fig = figure('Position',[50 50 1200 420]);
+sgtitle({sprintf('%s: %s relationship, no stage split', comp_tag, pred_lbl), ...
+    'Simple binned view; exact model formula printed in each panel'}, 'FontSize',12);
+labels = {'All trials','Incorrect trials','Correct trials'};
+masks = {true(height(T),1), T.correct_num==0, T.correct_num==1};
+forms = {formula_all, formula_sub, formula_sub};
+terms = {{'pred_z','pred_z:correct_cat'}, {'pred_z'}, {'pred_z'}};
+term_lbls = {{pred_lbl,[pred_lbl '×outcome']}, {pred_lbl}, {pred_lbl}};
+for ii = 1:3
+    ax = subplot(1,3,ii); hold(ax,'on');
+    Ti = T(masks{ii},:);
+    sig_line = simple_lme_sigline_s7d(Ti, forms{ii}, terms{ii}, term_lbls{ii}, outdir, comp_tag, pred_col, ['outcome_' labels{ii}]);
+    simple_binned_scatter_no_line_s7d(ax, Ti.pred_z, Ti.y_plot, [0.35 0.35 0.35], [pred_lbl ' (within-subject z)'], ylbl);
+    title(ax, labels{ii}, 'FontSize',10);
+    add_model_box_s7d(ax, forms{ii}, sig_line);
+    if reverse_y, set(ax,'YDir','reverse'); end
+    axis(ax,'square');
+end
+safe_pred = matlab.lang.makeValidName(pred_col);
+exportgraphics(fig, fullfile(outdir, sprintf('%s_A_%s_noStage_outcome.pdf', comp_tag, safe_pred)), 'ContentType','vector');
+exportgraphics(fig, fullfile(outdir, sprintf('%s_A_%s_noStage_outcome.png', comp_tag, safe_pred)), 'Resolution',300);
+end
+
+function plot_simple_relationship_by_stage_s7d(gt, outdir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, pred_col, pred_lbl)
+% Second simple figure: one panel per stage.
+try
+    T = simple_prepare_predictor_table_s7d(gt, pred_col, y_plot_col, y_model_col);
+catch ME
+    warning('%s %s stage plot skipped: %s', comp_tag, pred_lbl, ME.message); return;
+end
+if height(T) < 12 || ~ismember('stage', T.Properties.VariableNames), return; end
+T.stage = categorical(string(T.stage), {'LN','LE','RN','RE'}, 'Ordinal', true);
+T.correct_cat = categorical(double(T.correct_num), [0 1], {'Incorrect','Correct'});
+formula = 'y_model ~ pred_z * stage + correct_cat + block_type + (1|subj_id)';
+sig_line = simple_lme_sigline_s7d(T, formula, {'pred_z','pred_z:stage'}, {pred_lbl,[pred_lbl '×stage']}, outdir, comp_tag, pred_col, 'stage');
+
+fig = figure('Position',[50 50 1050 850]);
+sgtitle({sprintf('%s: %s relationship, stage-aware', comp_tag, pred_lbl), ...
+    'Same relationship as the no-stage figure, now split by block stage'}, 'FontSize',12);
+stages = {'LN','LE','RN','RE'};
+for si = 1:4
+    ax = subplot(2,2,si); hold(ax,'on');
+    Ti = T(T.stage==stages{si},:);
+    simple_binned_scatter_no_line_s7d(ax, Ti.pred_z, Ti.y_plot, [0.35 0.35 0.35], [pred_lbl ' (within-subject z)'], ylbl);
+    title(ax, sprintf('Stage %s', stages{si}), 'FontSize',10);
+    add_model_box_s7d(ax, formula, sig_line);
+    if reverse_y, set(ax,'YDir','reverse'); end
+    axis(ax,'square');
+end
+safe_pred = matlab.lang.makeValidName(pred_col);
+exportgraphics(fig, fullfile(outdir, sprintf('%s_B_%s_stageAware.pdf', comp_tag, safe_pred)), 'ContentType','vector');
+exportgraphics(fig, fullfile(outdir, sprintf('%s_B_%s_stageAware.png', comp_tag, safe_pred)), 'Resolution',300);
+end
+
+function plot_simple_false_feedback_s7d(gt, outdir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, pred_col, pred_lbl)
+% P-block false-feedback model, using variable name false_fb only.
+if ~ismember('false_fb', gt.Properties.VariableNames), return; end
+try
+    T = simple_prepare_predictor_table_s7d(gt(gt.block_type=='P',:), pred_col, y_plot_col, y_model_col);
+catch ME
+    warning('%s false-feedback plot skipped: %s', comp_tag, ME.message); return;
+end
+if height(T) < 12, return; end
+T.false_fb = categorical(double(T.false_fb), [0 1], {'TrueFB','FalseFB'});
+T.correct_cat = categorical(double(T.correct_num), [0 1], {'Incorrect','Correct'});
+formula = 'y_model ~ pred_z * false_fb * correct_cat + stage + (1|subj_id)';
+sig_line = simple_lme_sigline_s7d(T, formula, ...
+    {'pred_z','pred_z:false_fb','pred_z:correct_cat','pred_z:false_fb:correct_cat'}, ...
+    {pred_lbl,[pred_lbl '×falseFB'],[pred_lbl '×outcome'],'3-way'}, ...
+    outdir, comp_tag, pred_col, 'falseFB');
+
+fig = figure('Position',[50 50 1050 850]);
+sgtitle({sprintf('%s: P-block %s relationship by feedback validity and outcome', comp_tag, pred_lbl), ...
+    'Uses false\_fb directly; no false\_fb\_cat variable'}, 'FontSize',12);
+outcomes = {'Incorrect','Correct'}; fbs = {'TrueFB','FalseFB'};
+cols = {[0.15 0.45 0.70],[0.80 0.30 0.10]};
+for oi = 1:2
+    for fi = 1:2
+        ax = subplot(2,2,(oi-1)*2+fi); hold(ax,'on');
+        Ti = T(T.correct_cat==outcomes{oi} & T.false_fb==fbs{fi},:);
+        simple_binned_scatter_no_line_s7d(ax, Ti.pred_z, Ti.y_plot, cols{fi}, [pred_lbl ' (within-subject z)'], ylbl);
+        title(ax, sprintf('%s | %s', outcomes{oi}, fbs{fi}), 'FontSize',10);
+        add_model_box_s7d(ax, formula, sig_line);
+        if reverse_y, set(ax,'YDir','reverse'); end
+        axis(ax,'square');
+    end
+end
+safe_pred = matlab.lang.makeValidName(pred_col);
+exportgraphics(fig, fullfile(outdir, sprintf('%s_C_%s_falseFB_outcome.pdf', comp_tag, safe_pred)), 'ContentType','vector');
+exportgraphics(fig, fullfile(outdir, sprintf('%s_C_%s_falseFB_outcome.png', comp_tag, safe_pred)), 'Resolution',300);
+end
+
+function plot_simple_prior_moderator_s7d(gt, outdir, comp_tag, y_plot_col, y_model_col, ylbl, reverse_y, pred_col, pred_lbl, prior_kind)
+% Prior-uncertainty moderation of the predictor relationship.
+try
+    T = simple_prepare_predictor_table_s7d(gt, pred_col, y_plot_col, y_model_col);
+catch ME
+    warning('%s prior moderator plot skipped: %s', comp_tag, ME.message); return;
+end
+if height(T) < 12, return; end
+T.correct_cat = categorical(double(T.correct_num), [0 1], {'Incorrect','Correct'});
+switch lower(prior_kind)
+    case 'transition'
+        if ~ismember('transition_recent', T.Properties.VariableNames), return; end
+        T.transition_recent = categorical(string(T.transition_recent), {'D->D','D->P','P->D','P->P'});
+        T = T(~isundefined(T.transition_recent),:);
+        levels = {'D->D','D->P','P->D','P->P'};
+        formula = 'y_model ~ pred_z * transition_recent + correct_cat + stage + (1|subj_id)';
+        terms = {'pred_z','pred_z:transition_recent'};
+        labels = {pred_lbl,[pred_lbl '×transition']};
+        fname = 'transition';
+        ttl = 'recent transition';
+    otherwise
+        if ~ismember('n_prev_P_bin', T.Properties.VariableNames), return; end
+        T.n_prev_P_bin = categorical(string(T.n_prev_P_bin), {'0','1','2+'});
+        T = T(~isundefined(T.n_prev_P_bin),:);
+        levels = {'0','1','2+'};
+        formula = 'y_model ~ pred_z * n_prev_P_bin + correct_cat + stage + (1|subj_id)';
+        terms = {'pred_z','pred_z:n_prev_P_bin'};
+        labels = {pred_lbl,[pred_lbl '×nPrevP']};
+        fname = 'nPrevP';
+        ttl = 'number of previous P blocks';
+end
+sig_line = simple_lme_sigline_s7d(T, formula, terms, labels, outdir, comp_tag, pred_col, fname);
+
+nlev = numel(levels);
+fig = figure('Position',[50 50 300*nlev 420]);
+sgtitle({sprintf('%s: does prior uncertainty moderate the %s relationship?', comp_tag, pred_lbl), ...
+    sprintf('Prior uncertainty = %s', ttl)}, 'FontSize',12);
+for li = 1:nlev
+    ax = subplot(1,nlev,li); hold(ax,'on');
+    if strcmp(fname,'transition')
+        Ti = T(T.transition_recent==levels{li},:);
+    else
+        Ti = T(T.n_prev_P_bin==levels{li},:);
+    end
+    simple_binned_scatter_no_line_s7d(ax, Ti.pred_z, Ti.y_plot, [0.35 0.35 0.35], [pred_lbl ' (within-subject z)'], ylbl);
+    title(ax, levels{li}, 'FontSize',10);
+    add_model_box_s7d(ax, formula, sig_line);
+    if reverse_y, set(ax,'YDir','reverse'); end
+    axis(ax,'square');
+end
+safe_pred = matlab.lang.makeValidName(pred_col);
+exportgraphics(fig, fullfile(outdir, sprintf('%s_E_%s_prior_%s.pdf', comp_tag, safe_pred, fname)), 'ContentType','vector');
+exportgraphics(fig, fullfile(outdir, sprintf('%s_E_%s_prior_%s.png', comp_tag, safe_pred, fname)), 'Resolution',300);
+end
+
+function T = simple_prepare_predictor_table_s7d(Tin, pred_col, y_plot_col, y_model_col)
+T = Tin;
+if ~ismember(pred_col, T.Properties.VariableNames)
+    error('missing predictor column %s', pred_col);
+end
+if ~ismember(y_plot_col, T.Properties.VariableNames)
+    error('missing plot column %s', y_plot_col);
+end
+if ~ismember(y_model_col, T.Properties.VariableNames)
+    y_model_col = y_plot_col;
+end
+if ~ismember('correct_num', T.Properties.VariableNames)
+    if ismember('correct', T.Properties.VariableNames)
+        T.correct_num = double(T.correct);
+    else
+        T.correct_num = nan(height(T),1);
+    end
+end
+T.y_plot = double(T.(y_plot_col));
+T.y_model = double(T.(y_model_col));
+T.pred_raw = double(T.(pred_col));
+T.pred_z = nan(height(T),1);
+T.subj_id = categorical(string(T.subj_id));
+subs = unique(T.subj_id);
+for si = 1:numel(subs)
+    sm = T.subj_id == subs(si);
+    x = T.pred_raw(sm);
+    if sum(~isnan(x)) > 1 && std(x,'omitnan') > 0
+        T.pred_z(sm) = (x - mean(x,'omitnan')) ./ std(x,'omitnan');
+    end
+end
+if ismember('block_type', T.Properties.VariableNames)
+    T.block_type = categorical(string(T.block_type), {'D','P'});
+end
+if ismember('stage', T.Properties.VariableNames)
+    T.stage = categorical(string(T.stage), {'LN','LE','RN','RE'}, 'Ordinal', true);
+end
+T = T(~isnan(T.y_plot) & ~isnan(T.y_model) & ~isnan(T.pred_z), :);
+end
+
+function simple_binned_scatter_no_line_s7d(ax, x, y, clr, xlbl, ylbl)
+% Cleaner than the previous plots: only faint points + 4 bin means with 95% CI.
+x = double(x); y = double(y);
+ok = ~isnan(x) & ~isnan(y); x = x(ok); y = y(ok);
+if numel(x) < 5
+    text(ax,0.5,0.5,'Too few rows','Units','normalized','HorizontalAlignment','center');
+    xlabel(ax,xlbl,'Interpreter','none'); ylabel(ax,ylbl,'Interpreter','none');
+    return;
+end
+scatter(ax, x, y, 5, [0.72 0.72 0.72], 'filled', 'MarkerFaceAlpha',0.12, 'HandleVisibility','off');
+edges = quantile(x, [0 .25 .5 .75 1]); edges = unique(edges);
+if numel(edges) < 3, edges = linspace(min(x), max(x), min(5,numel(unique(x))+1)); end
+for bi = 1:numel(edges)-1
+    if bi == numel(edges)-1, m = x>=edges(bi) & x<=edges(bi+1); else, m = x>=edges(bi) & x<edges(bi+1); end
+    if sum(m) < 2, continue; end
+    xm = mean(x(m),'omitnan'); ym = mean(y(m),'omitnan');
+    ci = 1.96 * std(y(m),'omitnan') / sqrt(sum(m));
+    errorbar(ax, xm, ym, ci, 'o', 'Color', clr, 'MarkerFaceColor', clr, ...
+        'MarkerEdgeColor','k', 'MarkerSize',8, 'LineWidth',1.4, 'CapSize',7, 'HandleVisibility','off');
+end
+xline(ax,0,'k:','HandleVisibility','off');
+yline(ax,0,'k:','HandleVisibility','off');
+xlabel(ax,xlbl,'Interpreter','none'); ylabel(ax,ylbl,'Interpreter','none');
+set(ax,'TickDir','out','Box','off');
+end
+
+function sig_line = simple_lme_sigline_s7d(T, formula, terms, labels, outdir, comp_tag, pred_col, panel_tag)
+sig_line = 'LME: unavailable';
+try
+    Tm = T(~isnan(T.y_model) & ~isnan(T.pred_z), :);
+    if height(Tm) < 12 || numel(unique(Tm.subj_id)) < 4
+        sig_line = 'LME: too few rows'; return;
+    end
+    mdl = fitlme(Tm, formula, 'FitMethod','REML');
+    C = mdl.Coefficients;
+    bits = strings(1,numel(terms));
+    for ii = 1:numel(terms)
+        p = rq2_find_coef_p(C, terms{ii});
+        bits(ii) = sprintf('%s %s', labels{ii}, p_to_stars_local(p));
+    end
+    sig_line = ['LME: ' char(strjoin(bits, '; '))];
+    try
+        safe = matlab.lang.makeValidName(sprintf('%s_%s_%s', comp_tag, pred_col, panel_tag));
+        writetable(C, fullfile(outdir, [safe '_coefficients.csv']));
+    catch
+    end
+catch ME
+    sig_line = ['LME failed: ' ME.message];
+    if numel(sig_line) > 90, sig_line = sig_line(1:90); end
+end
+end
+
+function add_model_box_s7d(ax, formula, sig_line)
+% Transparent model annotation: exact formula + stars.
+if numel(formula) > 82
+    formula_txt = [formula(1:82) '...'];
+else
+    formula_txt = formula;
+end
+text(ax,0.02,0.98,sprintf('Model: %s\n%s', formula_txt, sig_line), ...
+    'Units','normalized','VerticalAlignment','top','FontSize',7, ...
+    'BackgroundColor','w','Margin',3,'EdgeColor',[0.85 0.85 0.85], ...
+    'Interpreter','none');
+end
+
 function plot_confidence_fRN(gt_inc, outdir, fn_feat, fn_ylbl, reverse_y)
 %PLOT_CONFIDENCE_FRN  Scatter + regression: confidence vs FN.
-if nargin < 3 || isempty(fn_feat), fn_feat = 'prefrontal_mean_norm_z'; end
+if nargin < 3 || isempty(fn_feat), fn_feat = 'prefrontal_neg_peak_norm_z'; end
 if nargin < 4 || isempty(fn_ylbl), fn_ylbl = 'Feedback negativity (z)'; end
 if nargin < 5 || isempty(reverse_y), reverse_y = false; end
 
