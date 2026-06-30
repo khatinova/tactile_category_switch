@@ -723,12 +723,125 @@ end
 saveas(fig_summary, fullfile(figure_output_folder,'S10_TF_theta_stage_summary.pdf'));
 close(fig_summary);
 
+% =========================================================================
+%% THETA POWER DIFFERENCE FIGURE
+%
+% Four requested contrasts on theta ERSP (4-8 Hz, 200-400 ms, FCz):
+%   1. D blocks : Incorrect − Correct
+%   2. P blocks : Incorrect − Correct
+%   3. Correct  : D − P
+%   4. Incorrect: D − P
+%
+% Each panel shows the two conditions being contrasted (group mean bar +
+% per-subject paired points/lines), with the mean difference (Delta, dB)
+% and a paired t-test annotated. The difference IS the paired contrast, so
+% the connecting lines and Delta text make it directly readable.
+% Trials are restricted to true-feedback trials (~false_fb) and collapsed
+% across stages (per-subject means).
+% =========================================================================
+fprintf('\nPlotting theta-power difference figure...\n');
+
+subjs = unique(group_table.subj_id);
+nS    = numel(subjs);
+[thD_c, thD_i, thP_c, thP_i] = deal(nan(nS,1));
+
+for si = 1:nS
+    sm = group_table.subj_id == subjs(si) & ...
+         ~group_table.false_fb & ~isnan(group_table.theta_ersp);
+    thD_c(si) = mean(group_table.theta_ersp(sm & group_table.block_type=='D' & group_table.correct==1), 'omitnan');
+    thD_i(si) = mean(group_table.theta_ersp(sm & group_table.block_type=='D' & group_table.correct==0), 'omitnan');
+    thP_c(si) = mean(group_table.theta_ersp(sm & group_table.block_type=='P' & group_table.correct==1), 'omitnan');
+    thP_i(si) = mean(group_table.theta_ersp(sm & group_table.block_type=='P' & group_table.correct==0), 'omitnan');
+end
+
+CLR_COR = [0.10 0.60 0.10];   % correct (green)
+CLR_INC = [0.70 0.10 0.10];   % incorrect (red)
+CLR_D   = [0.15 0.45 0.70];   % deterministic (blue)
+CLR_P   = [0.80 0.30 0.10];   % probabilistic (orange)
+
+fig_thdiff = figure('Position',[50 50 1100 800]);
+sgtitle({'Theta ERSP differences (4-8 Hz, 200-400 ms, FCz)', ...
+    'Lines = within-subject pairs; \Delta = mean difference (dB)'}, 'FontSize',12);
+
+% 1. D blocks: Incorrect − Correct
+ax1 = subplot(2,2,1);
+paired_theta_panel(ax1, thD_c, thD_i, 'Correct','Incorrect', CLR_COR, CLR_INC, ...
+    'D blocks: Incorrect − Correct');
+
+% 2. P blocks: Incorrect − Correct
+ax2 = subplot(2,2,2);
+paired_theta_panel(ax2, thP_c, thP_i, 'Correct','Incorrect', CLR_COR, CLR_INC, ...
+    'P blocks: Incorrect − Correct');
+
+% 3. Correct trials: D − P
+ax3 = subplot(2,2,3);
+paired_theta_panel(ax3, thP_c, thD_c, 'P','D', CLR_P, CLR_D, ...
+    'Correct trials: D − P');
+
+% 4. Incorrect trials: D − P
+ax4 = subplot(2,2,4);
+paired_theta_panel(ax4, thP_i, thD_i, 'P','D', CLR_P, CLR_D, ...
+    'Incorrect trials: D − P');
+
+saveas(fig_thdiff, fullfile(figure_output_folder,'S10_TF_theta_difference.pdf'));
+fprintf('Saved S10_TF_theta_difference.pdf\n');
+
 fprintf('\nAll done.\n');
 
 
 % =========================================================================
 %% LOCAL FUNCTIONS  (all definitions live at the END of the file)
 % =========================================================================
+
+% --------------------------------------------------------------------------
+function paired_theta_panel(ax, va, vb, lbl_a, lbl_b, clr_a, clr_b, ttl)
+%PAIRED_THETA_PANEL  Two-condition paired comparison of theta ERSP.
+%   Left bar  = va (lbl_a); right bar = vb (lbl_b).
+%   Delta and the paired t-test are reported as (vb - va), matching the
+%   "<lbl_b> - <lbl_a>" convention used in the panel title.
+ok = ~isnan(va) & ~isnan(vb);
+va = va(ok);  vb = vb(ok);
+n  = numel(va);
+hold(ax,'on');
+
+bar(ax, 1, mean(va), 0.6, 'FaceColor', clr_a, 'FaceAlpha', 0.65, 'EdgeColor','none');
+bar(ax, 2, mean(vb), 0.6, 'FaceColor', clr_b, 'FaceAlpha', 0.65, 'EdgeColor','none');
+
+% Within-subject connecting lines
+for i = 1:n
+    hl = plot(ax, [1 2], [va(i) vb(i)], '-', 'Color', [0.5 0.5 0.5], ...
+        'LineWidth', 0.6, 'HandleVisibility','off');
+    try, hl.Color(4) = 0.30; catch, end   % transparency (R2019b+)
+end
+scatter(ax, ones(n,1),   va, 20, clr_a, 'filled', 'MarkerFaceAlpha', 0.55, 'HandleVisibility','off');
+scatter(ax, 2*ones(n,1), vb, 20, clr_b, 'filled', 'MarkerFaceAlpha', 0.55, 'HandleVisibility','off');
+
+errorbar(ax, [1 2], [mean(va) mean(vb)], ...
+    [std(va,'omitnan')/sqrt(max(n,1)), std(vb,'omitnan')/sqrt(max(n,1))], ...
+    'k.', 'LineWidth', 1.3, 'CapSize', 7, 'HandleVisibility','off');
+
+yline(ax, 0, 'k:', 'HandleVisibility','off');
+set(ax, 'XTick', [1 2], 'XTickLabel', {lbl_a, lbl_b}, 'TickDir','out');
+xlim(ax, [0.4 2.6]);
+ylabel(ax, 'Theta ERSP (dB)');
+title(ax, sprintf('%s  (n=%d)', ttl, n), 'FontSize', 9);
+
+if n >= 2
+    d_mean        = mean(vb - va, 'omitnan');
+    [~, p, ~, st] = ttest(vb, va);
+    if     p < 0.001, star = '***';
+    elseif p < 0.01,  star = '**';
+    elseif p < 0.05,  star = '*';
+    else,             star = 'ns';
+    end
+    yl = ylim(ax);
+    text(ax, 1.5, yl(2), ...
+        sprintf('\\Delta = %.2f dB  %s\nt(%d) = %.2f, p = %.3f', ...
+                d_mean, star, st.df, st.tstat, p), ...
+        'HorizontalAlignment','center','VerticalAlignment','top','FontSize',8);
+end
+end
+
 
 % --------------------------------------------------------------------------
 function stat = run_tf_cluster_permtest(diff_maps, n_perm, alpha_clust)
