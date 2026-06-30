@@ -42,7 +42,18 @@
 % console at startup and passed to each sub-script via the shared workspace.
 % Each S-script also defines base_path near its own top — keep them in sync.
 
+<<<<<<< Updated upstream:EEG pipeline/RUN_PIPELINE.m
 base_path = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
+=======
+REMOTE =1;   % 0 = Windows UNC, 1 = Mac/Linux mount — ALSO update remote= in each S-script
+
+switch REMOTE
+    case 1
+        BASE_PATH = '/Volumes/PHARM_BANERJEE/data/Projects/EEG_projects/Salient_Modality_Switch/Salient mod switch KH';
+    case 0
+        BASE_PATH = '\\humerus\pharm_banerjee\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH';
+end
+>>>>>>> Stashed changes:RUN_PIPELINE.m
 
 % Add pipeline utilities (subject-ID helpers, figure style, etc.)
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));
