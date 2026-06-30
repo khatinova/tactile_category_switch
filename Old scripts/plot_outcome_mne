@@ -1,0 +1,406 @@
+# outcome_epoching.py
+import mne
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.io
+import pathlib
+import os
+
+# --------------------------
+# USER CONFIG
+# --------------------------
+# change paths to match your environment
+input_folder = pathlib.Path(
+    r"Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH\Results\EEG analysis\Winter 2026 outcomes"
+)
+output_folder = input_folder / "Epoch analysis"
+figure_output_folder = pathlib.Path(
+    r"Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH\Results\EEG analysis\Winter 2026 outcomes\Figures"
+)
+
+behav_mat_path = pathlib.Path(
+    r"Z:\data\Projects\EEG_projects\Salient_Modality_Switch\Salient mod switch KH\Results\Behav results\all_trial_data_v2.mat"
+)
+
+os.makedirs(output_folder, exist_ok=True)
+os.makedirs(figure_output_folder, exist_ok=True)
+
+# epoch window and baseline (seconds)
+tmin, tmax = -0.5, 1.5
+baseline = (tmin, 0.0)  # -500:0 ms baseline as seconds
+
+# subjects to run (replicates your MATLAB valid_subjects)
+valid_subjects = list(range(3, 13)) + [14, 15, 17, 18]
+
+# arrays to collect group results (lists -> stack later)
+all_correct = []
+all_incorrect = []
+all_rewp = []
+all_p3_correct = []
+all_p3_incorrect = []
+all_theta = []
+time_vector = None  # will be set from EEG_all.times
+
+# optional: load behaviour file if you need it (not used below but replicates MATLAB load)
+if behav_mat_path.exists():
+    try:
+        behav = scipy.io.loadmat(str(behav_mat_path))
+        print("Loaded behaviour mat (keys):", list(behav.keys()))
+    except Exception as e:
+        print("Could not load behaviour mat:", e)
+else:
+    print("Behaviour mat not found at", behav_mat_path)
+
+# helper: case-insensitive channel index
+def find_channel_index(ch_names, target):
+    target_low = target.lower()
+    for i, ch in enumerate(ch_names):
+        if ch.lower() == target_low:
+            return i
+    return None
+
+# loop subjects
+for s in valid_subjects:
+    subj = f"Ox{s:02d}"
+    print(f"\n=== Processing {subj} ===")
+
+    # Build filename (you said your files are named like OxXX_ICA_pruned.set)
+    fname = f"{subj}_ICA_pruned.set"
+    raw_path = input_folder / fname
+    if not raw_path.exists():
+        print(f"File not found: {raw_path}. Skipping {subj}.")
+        continue
+
+    # load EEG (preprocessed EEGLAB .set)
+    raw = mne.io.read_raw_eeglab(str(raw_path), preload=True)
+    # store subject id similar to raw.info['subject_info']
+    raw.info['subject_info'] = {'id': s}
+
+    # determine outcome event codes (MATLAB logic)
+    if s < 9:
+        outcome_codes = ['10', '11']
+        correct_codes = [10]
+        incorrect_codes = [11]
+    else:
+        outcome_codes = ['31', '32', '33', '34']
+        correct_codes = [31, 32]
+        incorrect_codes = [33, 34]
+
+    # build event_id mapping robustly: try both string and int keys depending on annotations
+    # get events from annotations
+    events, event_id_map = mne.events_from_annotations(raw)
+    # event_id_map maps annotation description -> integer code
+    print("Detected event_id_map keys (sample):", list(event_id_map.keys())[:20])
+
+    # Try to create event_id dict that MNE expects (key -> int)
+    event_id = {}
+    for code in outcome_codes:
+        # try as string key present in event_id_map
+        if code in event_id_map:
+            event_id[code] = event_id_map[code]
+        else:
+            # sometimes keys are numeric strings but stored as ints in map, or vice-versa
+            # try all keys and compare numeric value if possible
+            try:
+                code_int = int(code)
+            except Exception:
+                code_int = None
+
+            matched = False
+            for k, v in event_id_map.items():
+                # if map key is numeric-like string
+                try:
+                    if int(str(k)) == code_int:
+                        event_id[code] = v
+                        matched = True
+                        break
+                except Exception:
+                    pass
+            if not matched:
+                # as a last resort, look for event codes equal to the numeric value v
+                # (some setups annotate descriptions like '31' but event_id_map key may be '31.0')
+                for k, v in event_id_map.items():
+                    if isinstance(k, str) and k.strip() == code:
+                        event_id[code] = v
+                        matched = True
+                        break
+            if not matched:
+                print(f"Warning: could not find mapping for outcome code {code}; it may not exist in this dataset.")
+
+    # If event_id mapping is empty for the outcome codes, try a numeric-based fallback:
+    if not event_id:
+        # create mapping from numeric values of event_id_map values back to themselves
+        for k, v in event_id_map.items():
+            try:
+                # keep mapping with string key of numeric representation
+                event_id[str(int(float(v)))] = v
+            except Exception:
+                event_id[str(k)] = v
+
+    print("Using event_id mapping for epoching:", event_id)
+
+    # Create epochs around the outcome events
+    # Use only those event_id values that we were able to resolve
+    if len(event_id) == 0:
+        print("No event_id mapping for outcomes. Skipping subject:", subj)
+        continue
+
+    # Only include outcome event id numbers for epoching
+    epochs = mne.Epochs(
+        raw,
+        events,
+        event_id=event_id,
+        tmin=tmin,
+        tmax=tmax,
+        baseline=baseline,
+        preload=True,
+        reject_by_annotation=True,
+        verbose=False
+    )
+
+    print(epochs)
+
+    # Create boolean masks for correct / incorrect using the numeric event codes
+    # Build evtCodes array like in MATLAB: numeric code per epoch
+    # epochs.events[:, 2] are integer event ids assigned by event_id_map
+    evt_ids_per_epoch = epochs.events[:, 2]  # numeric mapped IDs
+    # convert event_id mapping to reverse mapping value->key (string)
+    rev_map = {v: k for k, v in event_id.items()}
+
+    # create numeric code list corresponding to each epoch
+    evtCodes = []
+    for eid in evt_ids_per_epoch:
+        k = rev_map.get(eid, None)
+        if k is None:
+            # try to find key in global event_id_map that maps to this numeric id
+            for kk, vv in event_id_map.items():
+                if vv == eid:
+                    k = kk
+                    break
+        try:
+            evtCodes.append(int(str(k)))
+        except Exception:
+            # fallback: use eid itself (numeric)
+            evtCodes.append(int(eid))
+    evtCodes = np.array(evtCodes)
+
+    isCorrect = np.isin(evtCodes, correct_codes)
+    isIncorrect = np.isin(evtCodes, incorrect_codes)
+
+    # select correct / incorrect epochs
+    correct_epochs = epochs[isCorrect]
+    incorrect_epochs = epochs[isIncorrect]
+
+    # Save subject-level epochs (FIF)
+    subj_out_prefix = output_folder / subj
+    correct_epochs.save(str(subj_out_prefix) + '_correct-epo.fif', overwrite=True)
+    incorrect_epochs.save(str(subj_out_prefix) + '_incorrect-epo.fif', overwrite=True)
+    epochs.save(str(subj_out_prefix) + '_outcome-epo.fif', overwrite=True)
+
+    # -------------------------
+    # P3 at Pz (300-600 ms)
+    # -------------------------
+    ch_names = raw.ch_names
+    pz_idx = find_channel_index(ch_names, 'Pz')
+    p3_win = (0.300, 0.600)  # seconds
+
+    if pz_idx is not None and len(correct_epochs) > 0 and len(incorrect_epochs) > 0:
+        # mean across time window then across trials (like MATLAB mean(mean(...,2),3))
+        times = correct_epochs.times
+        p3_mask = (times >= p3_win[0]) & (times <= p3_win[1])
+
+        # get data shape (n_epochs, n_channels, n_times) using get_data()
+        cor_data = correct_epochs.get_data()  # shape (n_epochs, n_ch, n_times)
+        inc_data = incorrect_epochs.get_data()
+
+        p3_cor = np.nanmean(np.nanmean(cor_data[:, pz_idx, :][:, p3_mask], axis=1))
+        p3_inc = np.nanmean(np.nanmean(inc_data[:, pz_idx, :][:, p3_mask], axis=1))
+
+        all_p3_correct.append(p3_cor)
+        all_p3_incorrect.append(p3_inc)
+    else:
+        print("Pz or epochs missing for P3 for subject", subj)
+        all_p3_correct.append(np.nan)
+        all_p3_incorrect.append(np.nan)
+
+    # -------------------------
+    # MIDFRONTAL THETA (FCz 4-8 Hz, 200-500 ms)
+    # -------------------------
+    fc_idx = find_channel_index(ch_names, 'FCz')
+    if fc_idx is not None and len(epochs) > 0:
+        # compute TFR using Morlet wavelets for fc channel across all outcome epochs
+        # freqs 4-8, 10 frequencies
+        freqs = np.linspace(4, 8, 10)
+        n_cycles = freqs / 2.0  # reasonable tradeoff
+        # pick only fc channel from the epochs to speed up
+        picks_fc = [fc_idx]
+        # Use tfr_morlet on epochs (returns power object: n_epochs x n_channels x n_freqs x n_times if return_itc False)
+        power = mne.time_frequency.tfr_morlet(
+            epochs,
+            picks=picks_fc,
+            freqs=freqs,
+            n_cycles=n_cycles,
+            return_itc=False,
+            average=False,
+            verbose=False
+        )  # power.data shape: (n_epochs, n_channels, n_freqs, n_times) if average=False
+
+        # average across epochs (we want ERSP across epochs like newtimef)
+        # convert to average over epochs then baseline correct (baseline -0.5:0)
+        power_avg = np.mean(power.data, axis=0)  # shape (n_channels, n_freqs, n_times)
+        # apply baseline: compute baseline mean for each freq then compute log-ratio (natural log)
+        times_tf = power.times
+        freqs_tf = freqs
+        baseline_mask = (times_tf >= baseline[0]) & (times_tf <= baseline[1])
+        baseline_vals = np.mean(power_avg[:, :, baseline_mask], axis=2, keepdims=True)  # shape (n_ch, n_freqs, 1)
+        # avoid divide by zero
+        baseline_vals[baseline_vals == 0] = np.finfo(float).eps
+        ln_ratio = np.log(power_avg / baseline_vals)  # natural log ratio
+        # convert ln_ratio to dB: dB = 10 * log10(power / baseline) = (10 / ln(10)) * ln_ratio
+        ln_to_db = 10.0 / np.log(10.0)
+        power_db = ln_ratio * ln_to_db  # shape (n_ch, n_freqs, n_times)
+
+        # find time and freq indices of interest 200-500 ms and 4-8 Hz
+        time_mask = (times_tf >= 0.200) & (times_tf <= 0.500)
+        freq_mask = (freqs_tf >= 4.0) & (freqs_tf <= 8.0)
+        # select midfrontal channel 0 (since picks_fc selected fc_idx)
+        theta_vals = np.mean(power_db[0][freq_mask][:, time_mask], axis=(0, 1))  # mean over freq & time
+        # If above returned array, reduce to scalar
+        try:
+            theta_val = float(theta_vals)
+        except Exception:
+            theta_val = np.nan
+        all_theta.append(theta_val)
+    else:
+        print("FCz missing or no epochs for theta for subject", subj)
+        all_theta.append(np.nan)
+
+    # -------------------------
+    # DIAGNOSTIC ERP PLOTS (FCz and Cz)
+    # -------------------------
+    chan_idx = find_channel_index(ch_names, 'FCz')
+    cz_idx = find_channel_index(ch_names, 'Cz')
+
+    # compute erp at FCz and Cz: mean across trials
+    if chan_idx is not None and cz_idx is not None:
+        cor_data = correct_epochs.get_data() if len(correct_epochs) > 0 else np.empty((0, len(ch_names), len(epochs.times)))
+        inc_data = incorrect_epochs.get_data() if len(incorrect_epochs) > 0 else np.empty((0, len(ch_names), len(epochs.times)))
+        if cor_data.size and inc_data.size:
+            erp_cor = np.nanmean(cor_data[:, chan_idx, :], axis=0)
+            erp_inc = np.nanmean(inc_data[:, chan_idx, :], axis=0)
+            cz_erp_cor = np.nanmean(cor_data[:, cz_idx, :], axis=0)
+            cz_erp_inc = np.nanmean(inc_data[:, cz_idx, :], axis=0)
+            rewp = cz_erp_cor - cz_erp_inc
+
+            # store into group matrices (timepoints x subjects)
+            all_correct.append(erp_cor)
+            all_incorrect.append(erp_inc)
+            all_rewp.append(rewp)
+
+            time_vector = epochs.times  # seconds
+            # plot subject diagnostic
+            fig, axs = plt.subplots(2, 1, figsize=(8, 6))
+            axs[0].plot(time_vector * 1000, erp_cor, linewidth=1.5, color='g', label='Correct')
+            axs[0].plot(time_vector * 1000, erp_inc, linewidth=1.5, color='r', label='Incorrect')
+            axs[0].set_xlim([-200, 800])
+            axs[0].axvline(0, linestyle='--', color='k')
+            axs[0].axhline(0, linestyle='--', color='k')
+            axs[0].set_title(f"{subj} RewP at FCz (Correct vs Incorrect)")
+            axs[0].set_xlabel("Time (ms)")
+            axs[0].set_ylabel("uV")
+            axs[0].legend()
+
+            axs[1].plot(time_vector * 1000, rewp, linewidth=1.5, color='b')
+            axs[1].set_xlim([-200, 800])
+            axs[1].axvline(0, linestyle='--', color='k')
+            axs[1].axhline(0, linestyle='--', color='k')
+            axs[1].set_title(f"{subj} RewP (Correct - Incorrect) at Cz")
+            axs[1].set_xlabel("Time (ms)")
+            axs[1].set_ylabel("uV")
+
+            fig.tight_layout()
+            fig.savefig(figure_output_folder / f"{subj}_diagnostic_erp.png")
+            plt.close(fig)
+        else:
+            print("Not enough trials to compute diagnostic ERP for", subj)
+    else:
+        print("FCz or Cz not found for subject", subj)
+
+# End subject loop ---------------------------------------------------------
+
+# -------------------------
+# GROUP AVERAGES
+# -------------------------
+if len(all_correct) == 0:
+    print("No subjects produced ERPs. Exiting.")
+else:
+    all_correct_arr = np.column_stack(all_correct)  # (n_times, n_subjects)
+    all_incorrect_arr = np.column_stack(all_incorrect)
+    all_rewp_arr = np.column_stack(all_rewp)
+
+    grand_correct = np.nanmean(all_correct_arr, axis=1)
+    grand_incorrect = np.nanmean(all_incorrect_arr, axis=1)
+    grand_rewp = np.nanmean(all_rewp_arr, axis=1)
+
+    sem_correct = np.nanstd(all_correct_arr, axis=1, ddof=0) / np.sqrt(all_correct_arr.shape[1])
+    sem_incorrect = np.nanstd(all_incorrect_arr, axis=1, ddof=0) / np.sqrt(all_incorrect_arr.shape[1])
+    sem_rewp = np.nanstd(all_rewp_arr, axis=1, ddof=0) / np.sqrt(all_rewp_arr.shape[1])
+
+    # time_vector in seconds -> convert to ms for plotting x axis labels
+    t_ms = time_vector * 1000
+
+    # Plot group-level ERPs (Correct vs Incorrect + RewP)
+    fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+
+    # Correct shaded SEM
+    axs[0].fill_between(t_ms, grand_correct - sem_correct, grand_correct + sem_correct,
+                        color=(0.6, 1.0, 0.6), alpha=0.3, edgecolor='none')
+    # Incorrect shaded SEM
+    axs[0].fill_between(t_ms, grand_incorrect - sem_incorrect, grand_incorrect + sem_incorrect,
+                        color=(1.0, 0.6, 0.6), alpha=0.3, edgecolor='none')
+    axs[0].plot(t_ms, grand_correct, 'g', linewidth=2, label='Correct')
+    axs[0].plot(t_ms, grand_incorrect, 'r', linewidth=2, label='Incorrect')
+    axs[0].axvline(0, linestyle='--', color='k')
+    axs[0].axhline(0, linestyle='--', color='k')
+    axs[0].set_xlim([-200, 800])
+    axs[0].set_title('Grand Average Cz: Correct vs Incorrect')
+    axs[0].set_xlabel('Time (ms)')
+    axs[0].set_ylabel('uV')
+    axs[0].legend()
+
+    # RewP
+    axs[1].fill_between(t_ms, grand_rewp - sem_rewp, grand_rewp + sem_rewp,
+                        color=(0.7, 0.7, 1.0), alpha=0.3, edgecolor='none')
+    axs[1].plot(t_ms, grand_rewp, 'b', linewidth=2)
+    axs[1].axvline(0, linestyle='--', color='k')
+    axs[1].axhline(0, linestyle='--', color='k')
+    axs[1].set_xlim([-200, 800])
+    axs[1].set_title('Grand Average RewP (Correct − Incorrect) at Cz')
+    axs[1].set_xlabel('Time (ms)')
+    axs[1].set_ylabel('uV')
+
+    fig.tight_layout()
+    fig.savefig(figure_output_folder / "group_rewP.png")
+    plt.close(fig)
+
+    # P3 bar
+    fig = plt.figure(figsize=(5, 4))
+    mean_p3_cor = np.nanmean(all_p3_correct)
+    mean_p3_inc = np.nanmean(all_p3_incorrect)
+    plt.bar([0, 1], [mean_p3_cor, mean_p3_inc], color=['g', 'r'])
+    plt.xticks([0, 1], ['Correct', 'Incorrect'])
+    plt.ylabel('uV')
+    plt.title('Grand Average P3 (Pz 300–600 ms)')
+    fig.savefig(figure_output_folder / "group_p3.png")
+    plt.close(fig)
+
+    # Theta bar
+    fig = plt.figure(figsize=(5, 4))
+    plt.bar([0], [np.nanmean(all_theta)], color=['#6161ff'])
+    plt.xticks([0], ['Midfrontal Theta'])
+    plt.ylabel('Theta Power (dB-ish)')
+    plt.title('Grand Average Midfrontal Theta (FCz 200–500 ms)')
+    fig.savefig(figure_output_folder / "group_theta.png")
+    plt.close(fig)
+
+    print("Finished. Figures saved to:", figure_output_folder)

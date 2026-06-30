@@ -62,9 +62,9 @@ fprintf('================================================================\n\n');
 %           <DATA>/behav_table_June2026.mat  (or behav_table.mat / group_T.mat)
 %  OUTPUT : <Results>/Simulation results/Figures/
 
-fprintf('─── S5: Behavioural computational modelling ────────────────────\n');
-run(fullfile(fileparts(mfilename('fullpath')), 'S5_behavioural_modelling.m'));
-fprintf('S5 complete.\n\n');
+% fprintf('─── S5: Behavioural computational modelling ────────────────────\n');
+% run(fullfile(fileparts(mfilename('fullpath')), 'S5_behavioural_modelling.m'));
+% fprintf('S5 complete.\n\n');
 
 %% ── S5b | Additional models (RW-dual, HGF) — OPTIONAL ──────────────────────
 %
