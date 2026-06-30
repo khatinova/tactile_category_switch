@@ -144,37 +144,67 @@ CONF_OFFSET    = 1;
 CONF_GAIN      = (CONF_SCALE_MAX - CONF_OFFSET) / 0.5;   % = 18
 ALPHA_INIT     = 0.5;   % first-encounter learning rate boost
 
-% ── Stimulus feature structure — 2×2 dimensional shift ───────────────────
-%   Pre-rev rule:  Go iff Feature1 == 1  → stims 1,2 are Go
-%   Post-rev rule: Go iff Feature2 == 1  → stims 1,3 are Go
+% ── Stimulus structure — category reversal ────────────────────────────────
+%   The task has 4 stimuli. Before reversal, two are Go targets and two are
+%   NoGo. At reversal, one PAIR switches status while the other is maintained.
 %
-%   Stim | F1 | F2 | Pre-rev | Post-rev | Status
-%   ─────┼────┼────┼─────────┼──────────┼─────────────
-%     1  |  1 |  1 |   Go    |   Go     | MAINTAINED
-%     2  |  1 |  2 |   Go    |  NoGo    | SWITCHED
-%     3  |  2 |  1 |  NoGo   |   Go     | SWITCHED
-%     4  |  2 |  2 |  NoGo   |  NoGo    | MAINTAINED
+%   Two valid reversal configurations exist and VARY PER BLOCK:
+%     Config [1,4]: stim 1 (Go→NoGo) and stim 4 (NoGo→Go) switch
+%     Config [2,3]: stim 2 (Go→NoGo) and stim 3 (NoGo→Go) switch
+%
+%   KH cohort: [1,4] in ~86% of blocks, [2,3] in ~14%
+%   RR cohort: always [2,3]
+%
+%   The convention (matching compute_go_nogo_schedule from the FIXED script):
+%     pre_go  = [sw_stims(1), maint_stims(1)]   — two Go stims pre-reversal
+%     post_go = [sw_stims(2), maint_stims(1)]   — sw pair swaps, maint stays
+%
+%   For the Nassar MODEL FITTING, the specific reversal config does not matter
+%   because the model tracks per-stimulus beliefs using the actual observed
+%   go/nogo feedback sequence (y_t). The rules below are ONLY used for
+%   simulation (§3) and PPC (§10).
+%
+%   IMPORTANT: SWITCH_STIMS varies per block in the real data. For simulation
+%   we randomise it per block (80% [1,4], 20% [2,3] mimicking empirical).
+%   For summary stats on real data (§10 PPC), we read it from the data itself.
 
-STIM_FEATURES = [1 1; 1 2; 2 1; 2 2];
-PRE_REV_RULE  = @(s) STIM_FEATURES(s,1) == 1;
-POST_REV_RULE = @(s) STIM_FEATURES(s,2) == 1;
+STIM_FEATURES = [1 1; 1 2; 2 1; 2 2];   % dummy feature matrix (4 stims, for N_s)
 
-% ── Read SWITCH_STIMS from behavioural group_T when available ─────────────
-% The behavioural extraction pipeline should preserve switch_stims.  If not,
-% the dimensional-shift default [2 3] is used, and fitting itself remains
-% stimulus-specific because it reads the actual stimID/stimType sequence.
+% For the summary plots and the majority of blocks, set a "dominant" switch
+% config.  This is used ONLY for labelling and the rare case where per-block
+% switch info is unavailable.
+SWITCH_STIMS_DEFAULT = [2 3];  % will be overridden per-block in simulation
+
+% ── Read dominant SWITCH_STIMS from behavioural group_T (for plots only) ──
 SWITCH_STIMS = read_switch_stims_from_table_lc(group_T);
 if isempty(SWITCH_STIMS)
-    warning('switch_stims not found or empty in behavioural group_T. Defaulting to [2 3].');
-    SWITCH_STIMS = [2 3];
+    SWITCH_STIMS = infer_switch_stims_from_data(all_trial_data);
+    if isempty(SWITCH_STIMS)
+        SWITCH_STIMS = SWITCH_STIMS_DEFAULT;
+        fprintf('switch_stims not determined. Using default [%s] for plots.\n', num2str(SWITCH_STIMS));
+    else
+        fprintf('Inferred dominant SWITCH_STIMS = [%s] from all_trial_data (for plots).\n', num2str(SWITCH_STIMS));
+    end
 end
-MAINT_STIMS = setdiff(1:size(STIM_FEATURES,1), SWITCH_STIMS);
-fprintf('SWITCH_STIMS used for summaries/plots: [%s]\n', num2str(SWITCH_STIMS));
+% Validate: must be [1 4] or [2 3]
+if ~(isequal(sort(SWITCH_STIMS), [2 3]) || isequal(sort(SWITCH_STIMS), [1 4]))
+    warning('Unexpected SWITCH_STIMS = [%s]. Expected [1 4] or [2 3]. Using as-is.', num2str(SWITCH_STIMS));
+end
+MAINT_STIMS = setdiff(1:4, SWITCH_STIMS);
+fprintf('SWITCH_STIMS (dominant, for plots): [%s]\n', num2str(SWITCH_STIMS));
 fprintf('MAINT_STIMS: [%s]\n', num2str(MAINT_STIMS));
+
+% Legacy placeholders — passed to simulate_one_subject for signature compat
+% but ignored inside that function (it uses compute_go_nogo_schedule instead).
+PRE_REV_RULE  = [];
+POST_REV_RULE = [];
 
 % Nassar simulation parameters
 params.H    = 0.05;
 params.beta = SOFTMAX_BETA;
+
+% Probability of [1,4] vs [2,3] in simulation (matches KH empirical ~86%)
+P_SWITCH_14 = 0.85;
 
 % =========================================================================
 %% §3  NASSAR SIMULATION LOOP
@@ -185,19 +215,25 @@ for subj = 1:N_SUBJECTS
     sl = sprintf('sub%02d', subj);
 
     subj_structure = BLOCK_ORDER_SET{randi(numel(BLOCK_ORDER_SET))};
-    N_BLOCKS = numel(subj_structure);
+    nB_sim = numel(subj_structure);
 
-    reversal_trials = randi([REV_MIN, REV_MAX], 1, N_BLOCKS);
+    reversal_trials = randi([REV_MIN, REV_MAX], 1, nB_sim);
 
-    td = init_trial_data(N_BLOCKS, N_TRIALS);
-    mv = init_model_vars(N_BLOCKS, N_TRIALS, N_STIM);
+    td = init_trial_data(nB_sim, N_TRIALS);
+    mv = init_model_vars(nB_sim, N_TRIALS, N_STIM);
 
-    [N_BLOCKS, N_TRIALS] = size(td.correct);
-    for b = 1:N_BLOCKS
+    for b = 1:nB_sim
         curr_block_type = subj_structure(b);
         td.block_type_label{b} = char(curr_block_type);
         td.block_is_det(b) = curr_block_type == 'D';
 
+        % Per-block switch stims (randomised to match empirical distribution)
+        if rand < P_SWITCH_14
+            sw_stims_b = [1 4];
+        else
+            sw_stims_b = [2 3];
+        end
+        td.switch_stims{b} = sw_stims_b;
 
         if curr_block_type == 'D'
             trueFB = P_TRUE_FB_D;
@@ -210,16 +246,13 @@ for subj = 1:N_SUBJECTS
 
         td.block_structure = subj_structure;
         td.block_type(b) = curr_block_type;
-         revTrial = reversal_trials(b);
+        revTrial = reversal_trials(b);
 
         stim_order = repmat(1:N_STIM, 1, N_REPS);
         stim_order = stim_order(randperm(N_TRIALS));
 
-        go_nogo = nan(1, N_TRIALS);
-        for t = 1:N_TRIALS
-            s = stim_order(t);
-            go_nogo(t) = double(ternary(t <= revTrial, PRE_REV_RULE(s), POST_REV_RULE(s)));
-        end
+        % Compute Go/NoGo schedule using per-block switch stims
+        go_nogo = compute_go_nogo_schedule(stim_order, revTrial, sw_stims_b, N_TRIALS);
 
         nTrue      = round(trueFB * N_TRIALS);
         fb_arr     = [true(1,nTrue), false(1,N_TRIALS-nTrue)];
@@ -264,7 +297,7 @@ for subj = 1:N_SUBJECTS
             td.stimID(b,t)           = s_t;
             td.feat1(b,t)            = STIM_FEATURES(s_t,1);
             td.feat2(b,t)            = STIM_FEATURES(s_t,2);
-            td.switched(b,t)         = ismember(s_t, SWITCH_STIMS);
+            td.switched(b,t)         = ismember(s_t, sw_stims_b);
             td.goTrial(b,t)          = go_true;
             td.respWasGo(b,t)        = resp_go;
             td.correct(b,t)          = correct;
@@ -288,7 +321,7 @@ for subj = 1:N_SUBJECTS
     model_vars.(sl) = mv;
 end
 fprintf('Simulation complete: %d subjects × %d blocks × %d trials\n', ...
-    N_SUBJECTS, N_BLOCKS, N_TRIALS);
+    N_SUBJECTS, nB_sim, N_TRIALS);
 
 % =========================================================================
 %% §4  SIMULATION FIGURES
@@ -1116,6 +1149,9 @@ else
 
     group_T = add_nassar_to_group_table(group_T, results);
 
+    % Also compute and add RW latents (PE, value) for EEG modelling
+    group_T = add_rw_latents_to_group_table(group_T, all_trial_data, STIM_FEATURES);
+
     out_file = fullfile(data_path, 'behav_table_June2026_RL.mat');
     save(out_file, 'group_T');
     save(fullfile(outpath, 'behaviour_RL_table.mat'), 'group_T');
@@ -1125,12 +1161,18 @@ else
     fprintf('  File: %s\n', out_file);
     fprintf('  Rows: %d  |  Cols: %d\n', height(group_T), width(group_T));
     fprintf('  Nassar columns added:\n');
-    fprintf('    PE_nassar      — δ_t = y_t − θ_t (prediction error)\n');
+    fprintf('    PE_nassar      — δ_t = y_t − θ_t (signed prediction error)\n');
+    fprintf('    PE_unsigned    — |δ_t| (unsigned / absolute prediction error)\n');
     fprintf('    omega          — ω_t (change-point probability)\n');
     fprintf('    alpha_nassar   — α_t (effective learning rate)\n');
     fprintf('    certainty      — |θ_t − 0.5| (prospective certainty)\n');
     fprintf('    surprise       — ω_t × |δ_t| (retrospective surprise)\n');
     fprintf('    theta_nassar   — θ_t (current belief state)\n');
+    fprintf('  RW columns added (for EEG model-based regression):\n');
+    fprintf('    RW_value       — V_t (expected value for chosen stimulus, pre-update)\n');
+    fprintf('    RW_PE          — δ_RW = outcome − V_t (signed RW prediction error)\n');
+    fprintf('    RW_PE_unsigned — |δ_RW| (unsigned RW PE)\n');
+    fprintf('    RW_alpha       — fixed α (fitted per subject)\n');
     fprintf('========================================================\n');
 end
 
@@ -1574,25 +1616,42 @@ end
 end
 
 function td_sim = simulate_one_subject(H, beta, nB, nT, rev_trials, ...
-    N_STIM, N_REPS, P_TRUE_FB, PRE_REV_RULE, POST_REV_RULE, SWITCH_STIMS, ALPHA_INIT)
+    N_STIM, N_REPS, P_TRUE_FB, PRE_REV_RULE_unused, POST_REV_RULE_unused, SWITCH_STIMS_unused, ALPHA_INIT) %#ok<INUSL>
+%SIMULATE_ONE_SUBJECT  Generate synthetic data from Nassar model.
+%
+%  Per-block switch stims are drawn randomly (85% [1,4], 15% [2,3]) matching
+%  the empirical KH distribution. Go/NoGo schedule is computed via
+%  compute_go_nogo_schedule.
+
 td_sim.correct    = nan(nB, nT);
 td_sim.goTrial    = nan(nB, nT);
 td_sim.confidence = nan(nB, nT);
 td_sim.stimID     = nan(nB, nT);
 td_sim.switched   = nan(nB, nT);
 td_sim.revTrial   = rev_trials(:)';
+td_sim.trueFB     = ones(nB, nT);
 
 for b = 1:nB
     rev_b = round(rev_trials(b));
-    pfb   = ternary(b <= numel(P_TRUE_FB), P_TRUE_FB(b), 1.0);
+    if numel(P_TRUE_FB) >= b
+        pfb = P_TRUE_FB(b);
+    else
+        pfb = P_TRUE_FB(1);
+    end
+
+    % Per-block switch stims (randomised to match empirical distribution)
+    if rand < 0.85
+        sw_stims_b = [1 4];
+    else
+        sw_stims_b = [2 3];
+    end
 
     stim_order = repmat(1:N_STIM,1,N_REPS);
     stim_order = stim_order(randperm(nT));
-    go_nogo    = nan(1,nT);
-    for t = 1:nT
-        s = stim_order(t);
-        go_nogo(t) = double(ternary(t<=rev_b, PRE_REV_RULE(s), POST_REV_RULE(s)));
-    end
+
+    % Compute Go/NoGo schedule using per-block switch stims
+    go_nogo = compute_go_nogo_schedule(stim_order, rev_b, sw_stims_b, nT);
+
     nTrue  = round(pfb * nT);
     fb_vec = double([true(1,nTrue), false(1,nT-nTrue)]);
     fb_vec = fb_vec(randperm(nT));
@@ -1624,7 +1683,7 @@ for b = 1:nB
         td_sim.goTrial(b,t)    = go_true;
         td_sim.confidence(b,t) = max(1,min(10,round(conf_raw)));
         td_sim.stimID(b,t)     = s_t;
-        td_sim.switched(b,t)   = ismember(s_t, SWITCH_STIMS);
+        td_sim.switched(b,t)   = ismember(s_t, sw_stims_b);
     end
 end
 end
@@ -1727,7 +1786,7 @@ function group_T = add_nassar_to_group_table(group_T, results)
 % Nassar results are indexed per obs-row (packed, no NaN trials).
 % group_T has one row per behavioural trial including NaN-epoch rows.
 
-cols = {'PE_nassar','omega','alpha_nassar','certainty','surprise','theta_nassar'};
+cols = {'PE_nassar','PE_unsigned','omega','alpha_nassar','certainty','surprise','theta_nassar'};
 for c = cols
     group_T.(c{1}) = nan(height(group_T), 1);
 end
@@ -1757,6 +1816,7 @@ for si = 1:numel(subjs)
         match = sub_rows(blocks_gt == b_t & trials_gt == tr_t);
         if isempty(match), continue; end
         group_T.PE_nassar(match)      = r.delta_trial(t);
+        group_T.PE_unsigned(match)    = abs(r.delta_trial(t));
         group_T.omega(match)          = r.omega_trial(t);
         group_T.alpha_nassar(match)   = r.alpha_trial(t);
         group_T.certainty(match)      = r.certainty_trial(t);
@@ -1817,4 +1877,296 @@ function block_types = get_block_types_from_td_lc(td)
     end
 
     block_types = repmat({'unknown'}, nB, 1);
+end
+
+
+function go_nogo = compute_go_nogo_schedule(stim_order, revTrial, sw_stims, N_TRIALS)
+%COMPUTE_GO_NOGO_SCHEDULE  Generate Go/NoGo vector given per-block switch stims.
+%
+%  Convention (matching detect_reversal_KH and the empirical task):
+%    sw_stims(1) is Go pre-reversal, becomes NoGo post-reversal.
+%    sw_stims(2) is NoGo pre-reversal, becomes Go post-reversal.
+%    maint_stims(1) is Go throughout.
+%    maint_stims(2) is NoGo throughout.
+%
+%  Example: sw_stims = [1 4]
+%    Pre-rev Go stims:  [1, maint(1)] = [1, 2] or [1, 3]
+%    Post-rev Go stims: [4, maint(1)] = [4, 2] or [4, 3]
+%
+%  Example: sw_stims = [2 3]
+%    Pre-rev Go stims:  [2, maint(1)] = [2, 1] or [2, 4]
+%    Post-rev Go stims: [3, maint(1)] = [3, 1] or [3, 4]
+
+all_stims   = 1:4;
+maint_stims = setdiff(all_stims, sw_stims);
+
+% Pre-reversal: sw_stims(1) + maint_stims(1) are Go
+pre_go  = [sw_stims(1), maint_stims(1)];
+% Post-reversal: sw_stims(2) + maint_stims(1) are Go (switch reverses, maint stays)
+post_go = [sw_stims(2), maint_stims(1)];
+
+go_nogo = zeros(1, N_TRIALS);
+for t = 1:N_TRIALS
+    s = stim_order(t);
+    if t <= revTrial
+        go_nogo(t) = double(ismember(s, pre_go));
+    else
+        go_nogo(t) = double(ismember(s, post_go));
+    end
+end
+end
+
+
+function switch_stims = infer_switch_stims_from_data(all_trial_data)
+%INFER_SWITCH_STIMS_FROM_DATA  Determine switch stims from actual trial data.
+%
+%  Looks at goTrial assignments pre- and post-reversal across subjects.
+%  The switch stims are those whose go/nogo status changes at reversal.
+%  Valid outputs: [1 4] or [2 3]. Returns [] if cannot determine.
+
+switch_stims = [];
+subjects = fieldnames(all_trial_data);
+
+vote_23 = 0;
+vote_14 = 0;
+
+for si = 1:min(numel(subjects), 10)   % check first 10 subjects
+    sn = subjects{si};
+    if ~isfield(all_trial_data.(sn), 'trial_data'), continue; end
+    td = all_trial_data.(sn).trial_data;
+    if ~isfield(td, 'goTrial') || ~isfield(td, 'revTrial'), continue; end
+    
+    sf = 'stimID';
+    if ~isfield(td, sf)
+        if isfield(td, 'stimType'), sf = 'stimType'; else, continue; end
+    end
+    
+    [nB, nT] = size(td.correct);
+    
+    for b = 1:nB
+        rev = td.revTrial(b);
+        if isnan(rev) || rev < 10 || rev > nT - 5, continue; end
+        rev = round(rev);
+        
+        stims = td.(sf)(b,:);
+        go    = td.goTrial(b,:);
+        
+        % Pre-reversal: which stims are Go?
+        pre_mask = 1:min(rev-1, nT);
+        pre_go_stims = unique(stims(pre_mask(go(pre_mask)==1)));
+        
+        % Post-reversal: which stims are Go?
+        post_mask = (rev+1):min(rev+15, nT);
+        post_go_stims = unique(stims(post_mask(go(post_mask)==1)));
+        
+        if isempty(pre_go_stims) || isempty(post_go_stims), continue; end
+        
+        % Stims that gained Go status post-reversal
+        gained_go = setdiff(post_go_stims, pre_go_stims);
+        % Stims that lost Go status post-reversal
+        lost_go   = setdiff(pre_go_stims, post_go_stims);
+        
+        switched = sort(unique([gained_go(:); lost_go(:)]));
+        
+        if isequal(switched(:)', [2 3])
+            vote_23 = vote_23 + 1;
+        elseif isequal(switched(:)', [1 4])
+            vote_14 = vote_14 + 1;
+        end
+    end
+end
+
+if vote_23 > vote_14 && vote_23 > 0
+    switch_stims = [2 3];
+elseif vote_14 > vote_23 && vote_14 > 0
+    switch_stims = [1 4];
+elseif vote_23 > 0   % tie → default to [2 3]
+    switch_stims = [2 3];
+end
+end
+
+
+function group_T = add_rw_latents_to_group_table(group_T, all_trial_data, stim_features)
+%ADD_RW_LATENTS_TO_GROUP_TABLE  Compute trial-level RW model variables.
+%
+%  For each subject, fits a simple fixed-α RW per subject (grid search + fmincon)
+%  then runs the model forward to generate trial-level latents:
+%    RW_value       — V(s_t) before update (expected value for the stimulus)
+%    RW_PE          — δ = y_t − V(s_t) (signed prediction error)
+%    RW_PE_unsigned — |δ| (unsigned PE — salience signal)
+%    RW_alpha       — fitted α for this subject
+%
+%  These are essential regressors for model-based single-trial EEG analyses.
+
+cols = {'RW_value','RW_PE','RW_PE_unsigned','RW_alpha'};
+for c = cols
+    if ~ismember(c{1}, group_T.Properties.VariableNames)
+        group_T.(c{1}) = nan(height(group_T), 1);
+    end
+end
+
+subj_col = 'subjID';
+if ~ismember(subj_col, group_T.Properties.VariableNames) && ismember('subj_id', group_T.Properties.VariableNames)
+    subj_col = 'subj_id';
+end
+subjs = categories(categorical(group_T.(subj_col)));
+N_s   = size(stim_features, 1);
+
+fprintf('  Computing RW latents for %d subjects...\n', numel(subjs));
+
+for si = 1:numel(subjs)
+    sn = subjs{si};
+    if ~isfield(all_trial_data, sn), continue; end
+    td = all_trial_data.(sn).trial_data;
+    
+    if isfield(td,'stimType'), sf = 'stimType';
+    elseif isfield(td,'stimID'), sf = 'stimID';
+    else, continue; end
+    
+    has_perc = isfield(td,'perceivedCorrect') && ~all(isnan(td.perceivedCorrect(:)));
+    obs = pack_observations_local(td, sf, has_perc, N_s);
+    if isempty(obs.stim_id), continue; end
+    
+    % Fit fixed-α RW to this subject
+    alpha_grid = linspace(0.01, 0.60, 25);
+    beta_grid  = linspace(2, 15, 20);
+    nll_grid   = nan(numel(alpha_grid), numel(beta_grid));
+    
+    for ai = 1:numel(alpha_grid)
+        for bi = 1:numel(beta_grid)
+            nll_grid(ai,bi) = rw_nll_local([alpha_grid(ai), beta_grid(bi)], obs, N_s);
+        end
+    end
+    [~,bl] = min(nll_grid(:)); [ai0,bi0] = ind2sub(size(nll_grid),bl);
+    x0 = [alpha_grid(ai0), beta_grid(bi0)];
+    
+    opts = optimoptions('fmincon','Display','off','MaxIterations',300);
+    try
+        xf = fmincon(@(x) rw_nll_local(x, obs, N_s), x0,[],[],[],[], ...
+            [0.01,0.5],[0.60,30],[],opts);
+    catch
+        xf = x0;
+    end
+    alpha_fit = xf(1);
+    
+    % Run RW forward to get trial-level latents
+    [rw_value, rw_pe] = rw_forward(alpha_fit, obs, N_s);
+    
+    % Write to group_T
+    sm = string(group_T.(subj_col)) == string(sn);
+    sub_rows = find(sm);
+    blocks_gt = double(group_T.block(sub_rows));
+    trials_gt = double(group_T.trial(sub_rows));
+    
+    for t = 1:numel(obs.trial_id)
+        b_t  = obs.block_id(t);
+        tr_t = obs.trial_id(t);
+        match = sub_rows(blocks_gt == b_t & trials_gt == tr_t);
+        if isempty(match), continue; end
+        group_T.RW_value(match)       = rw_value(t);
+        group_T.RW_PE(match)          = rw_pe(t);
+        group_T.RW_PE_unsigned(match) = abs(rw_pe(t));
+        group_T.RW_alpha(match)       = alpha_fit;
+    end
+end
+fprintf('  RW latents written to group_T.\n');
+end
+
+
+function obs = pack_observations_local(td, stim_field, has_perc, N_s)
+%PACK_OBSERVATIONS_LOCAL  Minimal obs packer for RW fitting inside add_rw_latents.
+[nBlocks, nTrials] = size(td.correct);
+stim_id = []; block_id = []; trial_id = []; resp_go = []; y_t_vec = [];
+
+for b = 1:nBlocks
+    for t = 1:nTrials
+        cor  = td.correct(b,t);
+        gotr = td.goTrial(b,t);
+        if isnan(cor) || isnan(gotr), continue; end
+        stim_val = td.(stim_field)(b,t);
+        if isnan(stim_val) || stim_val < 1 || stim_val > N_s, continue; end
+
+        rgo = gotr * cor + (1-gotr) * (1-cor);
+
+        if has_perc && isfield(td,'perceivedCorrect') && ~isnan(td.perceivedCorrect(b,t))
+            perc_cor = td.perceivedCorrect(b,t);
+        else
+            perc_cor = cor;
+        end
+
+        yt = double((rgo==1 && perc_cor==1) || (rgo==0 && perc_cor==0));
+
+        stim_id(end+1)  = stim_val;
+        block_id(end+1) = b;
+        trial_id(end+1) = t;
+        resp_go(end+1)  = rgo;
+        y_t_vec(end+1)  = yt;
+    end
+end
+obs.stim_id  = stim_id;
+obs.block_id = block_id;
+obs.trial_id = trial_id;
+obs.resp_go  = resp_go;
+obs.y_t      = y_t_vec;
+end
+
+
+function nll = rw_nll_local(params, obs, N_s)
+%RW_NLL_LOCAL  Negative log-likelihood for fixed-α RW (local copy for §11).
+alpha = params(1);
+beta  = params(2);
+N     = numel(obs.stim_id);
+
+theta      = 0.5 * ones(1, N_s);
+ll         = 0;
+prev_block = -1;
+
+for t = 1:N
+    s_t = obs.stim_id(t);
+    if obs.block_id(t) ~= prev_block
+        theta      = 0.5 * ones(1, N_s);
+        prev_block = obs.block_id(t);
+    end
+    if isnan(s_t) || s_t < 1 || s_t > N_s, continue; end
+
+    p_go = 1 / (1 + exp(-beta * (theta(s_t) - 0.5)));
+    r_go = obs.resp_go(t);
+    ll   = ll + log(max(p_go^r_go * (1-p_go)^(1-r_go), 1e-10));
+
+    y_t        = obs.y_t(t);
+    delta_t    = y_t - theta(s_t);
+    theta(s_t) = max(0.01, min(0.99, theta(s_t) + alpha * delta_t));
+end
+nll = -ll;
+end
+
+
+function [rw_value, rw_pe] = rw_forward(alpha, obs, N_s)
+%RW_FORWARD  Run RW model forward to produce trial-level value and PE.
+%
+%  OUTPUTS:
+%    rw_value(t) = V(s_t) BEFORE update (the expectation at feedback time)
+%    rw_pe(t)    = y_t - V(s_t) (signed prediction error)
+
+N     = numel(obs.stim_id);
+theta = 0.5 * ones(1, N_s);
+prev_block = -1;
+
+rw_value = nan(1, N);
+rw_pe    = nan(1, N);
+
+for t = 1:N
+    s_t = obs.stim_id(t);
+    if obs.block_id(t) ~= prev_block
+        theta      = 0.5 * ones(1, N_s);
+        prev_block = obs.block_id(t);
+    end
+    if isnan(s_t) || s_t < 1 || s_t > N_s, continue; end
+    
+    rw_value(t) = theta(s_t);           % value BEFORE update
+    y_t         = obs.y_t(t);
+    delta_t     = y_t - theta(s_t);
+    rw_pe(t)    = delta_t;              % signed PE
+    theta(s_t)  = max(0.01, min(0.99, theta(s_t) + alpha * delta_t));
+end
 end
