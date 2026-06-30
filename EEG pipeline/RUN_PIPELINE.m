@@ -24,6 +24,7 @@
 %   S7b  — EEG feature-table validation / QC          [run BEFORE S7]
 %   S7   — EEG research-question analysis (RQ1–RQ5)
 %   S7e  — Hierarchical confidence models (RQ2/RQ3 standalone)    [optional]
+%   S8   — Model-based single-trial EEG (MRQ1–MRQ4)               [optional]
 %   S9   — RewP raw-ERP waveforms + poster figures                 [optional]
 %   S10  — Morlet wavelet time-frequency analysis (ERSP/ITPC)       [optional]
 %
@@ -133,6 +134,23 @@ fprintf('S7b complete.\n\n');
 fprintf('─── S7: EEG RQ analysis (RQ1–RQ5) ─────────────────────────────\n');
 run(fullfile(fileparts(mfilename('fullpath')), 'S7_eeg_rq_analysis.m'));
 fprintf('S7 complete.\n\n');
+
+%% ── S8 | Model-based single-trial EEG analysis — OPTIONAL ──────────────────
+%
+%  Uses computational model latents (Nassar surprise/ω/PE, RW PE/value)
+%  as trial-level regressors predicting single-trial EEG features.
+%  Four model-based research questions (MRQ1–MRQ4):
+%    MRQ1 — P300 as surprise signal, modulated by feedback validity
+%    MRQ2 — FRN ~ signed/unsigned PE, feedback discounting in P blocks
+%    MRQ3 — Frontal theta ~ |PE| → next-trial behavioural adjustment
+%    MRQ4 — Fronto-parietal PLV mediates PE → behaviour link
+%
+%  INPUT  : group_feature_table_combined.mat (from S4, with model latents from S5)
+%  OUTPUT : <Figures>/S8_model_based_EEG/, manuscript_stats_S8.txt
+
+% fprintf('─── S8: Model-based single-trial EEG ─────────────────────────\n');
+% run(fullfile(fileparts(mfilename('fullpath')), 'S8_model_based_eeg.m'));
+% fprintf('S8 complete.\n\n');
 
 %% ── S7e | Hierarchical confidence models (RQ2/RQ3) — OPTIONAL ──────────────
 %
