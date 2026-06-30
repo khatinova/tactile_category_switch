@@ -1,5 +1,5 @@
 % =============================================================================
-% RUN_PIPELINE.m  —  Master runner: analysis pipeline steps S5 → S9
+% RUN_PIPELINE.m  —  Master runner: analysis pipeline steps S5 → S10
 %
 % Tactile category-switch reversal-learning study
 % Deterministic (D) vs probabilistic (P) feedback blocks; KH and RR cohorts.
@@ -25,6 +25,7 @@
 %   S7   — EEG research-question analysis (RQ1–RQ5)
 %   S7e  — Hierarchical confidence models (RQ2/RQ3 standalone)    [optional]
 %   S9   — RewP raw-ERP waveforms + poster figures                 [optional]
+%   S10  — Morlet wavelet time-frequency analysis (ERSP/ITPC)       [optional]
 %
 % OUTPUTS
 % -------
@@ -47,7 +48,7 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));
 
 fprintf('\n');
 fprintf('================================================================\n');
-fprintf('  TACTILE CATEGORY-SWITCH — ANALYSIS PIPELINE  (S5 → S9)\n');
+fprintf('  TACTILE CATEGORY-SWITCH — ANALYSIS PIPELINE  (S5 → S10)\n');
 fprintf('  Base path : %s\n', base_path);
 fprintf('  Started   : %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
 fprintf('================================================================\n\n');
@@ -168,6 +169,26 @@ fprintf('S7 complete.\n\n');
 % fprintf('─── S9: RewP raw-ERP and poster figures ────────────────────────\n');
 % run(fullfile(fileparts(mfilename('fullpath')), 'S9_RewP_rawERP.m'));
 % fprintf('S9 complete.\n\n');
+
+%% ── S10 | Morlet wavelet time-frequency analysis — OPTIONAL ─────────────────
+%
+%  Computes ERSP + ITPC (Morlet wavelet) on the outcome-locked epochs and
+%  appends single-trial TF features (theta_ersp, alpha_ersp, beta_ersp,
+%  theta_itpc + _z versions) to the SAME combined table used by S7.
+%  Also runs a self-contained 2-D cluster permutation test (no FieldTrip).
+%
+%  REQUIRES: EEGLAB on path + the epoched .set files in
+%            Epoched_data_noisefiltering/ (not just the feature table).
+%            KH cohort only (valid_participants edited inside S10).
+%
+%  INPUT  : group_feature_table_combined.mat (from S4) + per-subject
+%           Ox##_outcome_trimmed.set epoch files
+%  OUTPUT : group_feature_table_combined_wavelet.mat, grand_tf.mat,
+%           tf_perm_stats.mat, and PDFs in <Figures>/TF_analysis/
+
+% fprintf('─── S10: Wavelet time-frequency analysis ───────────────────────\n');
+% run(fullfile(fileparts(mfilename('fullpath')), 'S10_wavelet_TF_analysis.m'));
+% fprintf('S10 complete.\n\n');
 
 %% ── DONE ────────────────────────────────────────────────────────────────────
 fprintf('================================================================\n');
