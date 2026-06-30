@@ -511,3 +511,122 @@ else
     mdl_theta_pe = []; mdl_theta_surp = []; mdl_theta_next = [];
 end
 
+
+%% =========================================================================
+%  MRQ4: FRONTO-PARIETAL PLV — THETA COUPLING AS MECHANISM
+%  =========================================================================
+%  Hypothesis: frontal theta is the mechanism through which mPFC
+%  communicates "need for cognitive control" to parietal areas. If so:
+%    - Trial-level theta should predict trial-level FP PLV
+%    - FP PLV should mediate the relationship between PE and next-trial
+%      behavioural adjustment
+%    - This coupling should be upregulated after surprising events
+%      (high omega / high surprise) especially during genuine change-points
+%
+%  Key test: PLV ~ Theta and PLV mediates PE → behaviour
+% =========================================================================
+fprintf('\n=== MRQ4: Fronto-parietal PLV ~ theta coupling ===\n');
+
+if all(ismember({'PLV_fp_z','Theta_amp_z','surprise_z','omega_z'}, gt.Properties.VariableNames))
+
+    % --- Model 4a: PLV ~ theta × block type ---
+    gt_m4 = gt(~isnan(gt.PLV_fp_z) & ~isnan(gt.Theta_amp_z), :);
+
+    mdl_plv_theta = fitlme(gt_m4, ...
+        'PLV_fp_z ~ Theta_amp_z * block_type + stage + (1 + Theta_amp_z | subj_id)', ...
+        'FitMethod','REML');
+    fprintf('  Model 4a: PLV ~ Theta × block_type\n');
+    disp(mdl_plv_theta.Coefficients);
+
+    % --- Model 4b: PLV ~ surprise × block type ---
+    gt_m4b = gt(~isnan(gt.PLV_fp_z) & ~isnan(gt.surprise_z), :);
+
+    mdl_plv_surp = fitlme(gt_m4b, ...
+        'PLV_fp_z ~ surprise_z * block_type + stage + (1 | subj_id)', ...
+        'FitMethod','REML');
+    fprintf('  Model 4b: PLV ~ surprise × block_type\n');
+    disp(mdl_plv_surp.Coefficients);
+
+    % --- Model 4c: Mediation test (simplified) ---
+    % Step 1: PE → PLV (path a)
+    % Step 2: PLV → next_correct controlling for PE (path b)
+    gt_m4c = gt(~isnan(gt.PLV_fp_z) & ~isnan(gt.PE_unsigned_z) & ~isnan(gt.next_correct), :);
+
+    if height(gt_m4c) > 50
+        % Path a: PE → PLV
+        mdl_path_a = fitlme(gt_m4c, ...
+            'PLV_fp_z ~ PE_unsigned_z + block_type + stage + (1 | subj_id)', ...
+            'FitMethod','REML');
+        fprintf('  Mediation path a (PE → PLV):\n');
+        disp(mdl_path_a.Coefficients(2,:));  % PE_unsigned_z coefficient
+
+        % Path b + c': PLV → next_correct controlling for PE
+        mdl_path_bc = fitglme(gt_m4c, ...
+            'next_correct ~ PLV_fp_z + PE_unsigned_z + block_type + stage + (1 | subj_id)', ...
+            'Distribution','Binomial','Link','logit','FitMethod','Laplace');
+        fprintf('  Mediation path b+c'' (PLV + PE → next_correct):\n');
+        disp(mdl_path_bc.Coefficients(2:3,:));  % PLV and PE coefficients
+    else
+        mdl_path_a = []; mdl_path_bc = [];
+    end
+
+    % ── FIGURE MRQ4: PLV and theta coupling ──────────────────────────────────
+    fig4 = figure('Position', [50 50 1200 500], 'Color', 'w');
+    sgtitle('MRQ4: Fronto-parietal PLV tracks theta and mediates PE \rightarrow behaviour', ...
+        'FontSize', 14, 'FontWeight', 'bold');
+
+    % Panel A: PLV ~ Theta
+    ax1 = subplot(1,3,1); hold(ax1, 'on');
+    plot_binned_relationship(ax1, gt_m4, 'Theta_amp_z', 'PLV_fp_z', ...
+        'block_type', {'D','P'}, {CLR_D, CLR_P}, {'Deterministic','Probabilistic'});
+    xlabel(ax1, 'Frontal theta power [z]');
+    ylabel(ax1, 'Fronto-parietal PLV [z]');
+    title(ax1, 'A. PLV ~ Theta');
+    legend(ax1, 'Box','off','Location','northwest','FontSize',9);
+
+    % Panel B: PLV ~ surprise
+    ax2 = subplot(1,3,2); hold(ax2, 'on');
+    plot_binned_relationship(ax2, gt_m4b, 'surprise_z', 'PLV_fp_z', ...
+        'block_type', {'D','P'}, {CLR_D, CLR_P}, {'Deterministic','Probabilistic'});
+    xlabel(ax2, 'Surprise (\omega \times |\delta|) [z]');
+    ylabel(ax2, 'Fronto-parietal PLV [z]');
+    title(ax2, 'B. PLV ~ Surprise');
+
+    % Panel C: Mediation path diagram (schematic + stats)
+    ax3 = subplot(1,3,3); hold(ax3, 'on'); axis(ax3, 'off');
+    title(ax3, 'C. Mediation summary', 'FontSize', 12);
+    if ~isempty(mdl_path_a) && ~isempty(mdl_path_bc)
+        a_coef = mdl_path_a.Coefficients.Estimate(2);
+        a_p    = mdl_path_a.Coefficients.pValue(2);
+        b_coef = mdl_path_bc.Coefficients.Estimate(2);
+        b_p    = mdl_path_bc.Coefficients.pValue(2);
+        cp_coef = mdl_path_bc.Coefficients.Estimate(3);
+        cp_p   = mdl_path_bc.Coefficients.pValue(3);
+
+        med_txt = { ...
+            'PE → PLV (path a):', ...
+            sprintf('  b = %.3f, p = %s', a_coef, format_p_s8(a_p)), ...
+            '', ...
+            'PLV → next correct (path b):', ...
+            sprintf('  OR = %.2f, p = %s', exp(b_coef), format_p_s8(b_p)), ...
+            '', ...
+            'PE → next correct (path c''):', ...
+            sprintf('  OR = %.2f, p = %s', exp(cp_coef), format_p_s8(cp_p)), ...
+            '', ...
+            sprintf('Indirect effect (a×b) = %.4f', a_coef * b_coef)};
+        text(ax3, 0.1, 0.9, med_txt, 'VerticalAlignment', 'top', ...
+            'FontSize', 10, 'FontName', 'Arial');
+    else
+        text(ax3, 0.5, 0.5, 'Insufficient data for mediation', ...
+            'HorizontalAlignment','center','FontSize',11);
+    end
+
+    apply_fig_style(fig4);
+    save_fig(fig4, fullfile(figure_output_folder, 'MRQ4_PLV_theta_mediation'));
+    fprintf('  Figure saved: MRQ4_PLV_theta_mediation\n');
+
+else
+    warning('MRQ4 skipped: missing required columns.');
+    mdl_plv_theta = []; mdl_plv_surp = []; mdl_path_a = []; mdl_path_bc = [];
+end
+
