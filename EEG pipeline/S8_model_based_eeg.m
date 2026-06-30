@@ -238,3 +238,276 @@ else
     mdl_p3_surprise = []; mdl_p3_omega = []; mdl_p3_learn = [];
 end
 
+
+%% =========================================================================
+%  MRQ2: FRN AND PREDICTION ERROR — FEEDBACK DISCOUNTING
+%  =========================================================================
+%  Hypothesis (Chase et al., 2011; Worthy et al., 2018):
+%    - FRN (prefrontal negativity) scales with signed PE (more negative for
+%      worse-than-expected outcomes).
+%    - In P blocks, participants who learn to discount unreliable feedback
+%      show attenuated FRN over time (Worthy 2018).
+%    - False feedback should produce a PE signal but adaptive learners
+%      should discount it (FRN attenuated for false vs true negative FB).
+%
+%  Key test: FRN × false_fb × trial_within_block (discounting dynamics)
+% =========================================================================
+fprintf('\n=== MRQ2: FRN ~ prediction error × feedback validity ===\n');
+
+if all(ismember({'prefrontal_neg_peak_norm_z','PE_nassar_z','RW_PE_z','false_fb'}, gt.Properties.VariableNames))
+
+    % --- Model 2a: FRN ~ Nassar PE (signed) × block type ---
+    gt_m2 = gt(~isnan(gt.prefrontal_neg_peak_norm_z) & ~isnan(gt.PE_nassar_z), :);
+
+    mdl_frn_pe = fitlme(gt_m2, ...
+        'prefrontal_neg_peak_norm_z ~ PE_nassar_z * block_type + correct + stage + (1 + PE_nassar_z | subj_id)', ...
+        'FitMethod','REML');
+    fprintf('  Model 2a: FRN ~ Nassar PE × block_type\n');
+    disp(mdl_frn_pe.Coefficients);
+
+    % --- Model 2b: FRN ~ unsigned PE (salience) × block type ---
+    gt_m2b = gt(~isnan(gt.prefrontal_neg_peak_norm_z) & ~isnan(gt.PE_unsigned_z), :);
+
+    mdl_frn_upe = fitlme(gt_m2b, ...
+        'prefrontal_neg_peak_norm_z ~ PE_unsigned_z * block_type + correct + stage + (1 | subj_id)', ...
+        'FitMethod','REML');
+    fprintf('  Model 2b: FRN ~ |PE| × block_type\n');
+    disp(mdl_frn_upe.Coefficients);
+
+    % --- Model 2c: False feedback dissociation (P blocks only) ---
+    % Does FRN differentiate true from false negative feedback?
+    gt_p_inc = gt(gt.block_type == 'P' & gt.correct == 0 & ...
+                  ~isnan(gt.prefrontal_neg_peak_norm_z), :);
+
+    if height(gt_p_inc) > 30
+        mdl_frn_false = fitlme(gt_p_inc, ...
+            'prefrontal_neg_peak_norm_z ~ false_fb_cat * stage + (1 | subj_id)', ...
+            'FitMethod','REML');
+        fprintf('  Model 2c: FRN ~ false_fb × stage (P-block incorrect trials)\n');
+        disp(mdl_frn_false.Coefficients);
+    else
+        mdl_frn_false = [];
+    end
+
+    % --- Model 2d: Feedback discounting over time in P blocks ---
+    % Does FRN attenuate within P blocks as participants learn to discount?
+    gt_p_all = gt(gt.block_type == 'P' & ~isnan(gt.prefrontal_neg_peak_norm_z), :);
+    if ismember('trial', gt_p_all.Properties.VariableNames)
+        gt_p_all.trial_z = nan(height(gt_p_all), 1);
+        for si = 1:numel(subj_list)
+            mask = gt_p_all.subj_id == subj_list(si);
+            tv = double(gt_p_all.trial(mask));
+            mn = mean(tv,'omitnan'); sd = std(tv,'omitnan');
+            if sd > 0, gt_p_all.trial_z(mask) = (tv - mn) / sd; end
+        end
+
+        mdl_frn_discount = fitlme(gt_p_all, ...
+            'prefrontal_neg_peak_norm_z ~ trial_z * correct + stage + (1 + trial_z | subj_id)', ...
+            'FitMethod','REML');
+        fprintf('  Model 2d: FRN ~ trial (within-block) × correct (P blocks) — discounting\n');
+        disp(mdl_frn_discount.Coefficients);
+    else
+        mdl_frn_discount = [];
+    end
+
+    % ── FIGURE MRQ2: FRN and PE ──────────────────────────────────────────────
+    fig2 = figure('Position', [50 50 1400 500], 'Color', 'w');
+    sgtitle('MRQ2: Prefrontal negativity (FRN) tracks prediction error — feedback discounting', ...
+        'FontSize', 14, 'FontWeight', 'bold');
+
+    % Panel A: FRN ~ signed PE, D vs P
+    ax1 = subplot(1,4,1); hold(ax1, 'on');
+    plot_binned_relationship(ax1, gt_m2, 'PE_nassar_z', 'prefrontal_neg_peak_norm_z', ...
+        'block_type', {'D','P'}, {CLR_D, CLR_P}, {'Deterministic','Probabilistic'});
+    xlabel(ax1, 'Signed PE (\delta) [z]');
+    ylabel(ax1, 'Prefrontal negativity [norm z]');
+    title(ax1, 'A. FRN ~ signed PE');
+    set(ax1, 'YDir', 'reverse');
+
+    % Panel B: FRN ~ unsigned PE (salience), D vs P
+    ax2 = subplot(1,4,2); hold(ax2, 'on');
+    plot_binned_relationship(ax2, gt_m2b, 'PE_unsigned_z', 'prefrontal_neg_peak_norm_z', ...
+        'block_type', {'D','P'}, {CLR_D, CLR_P}, {'Deterministic','Probabilistic'});
+    xlabel(ax2, '|PE| (salience) [z]');
+    ylabel(ax2, 'Prefrontal negativity [norm z]');
+    title(ax2, 'B. FRN ~ |PE| (salience)');
+    set(ax2, 'YDir', 'reverse');
+
+    % Panel C: FRN for true vs false negative FB (P blocks, incorrect)
+    ax3 = subplot(1,4,3); hold(ax3, 'on');
+    if ~isempty(mdl_frn_false) && height(gt_p_inc) > 30
+        stages = {'LN','LE','RN','RE'};
+        for fi = 0:1
+            fb_mask = gt_p_inc.false_fb == fi;
+            means = nan(1,4); sems = nan(1,4);
+            for si2 = 1:4
+                sm = fb_mask & gt_p_inc.stage == stages{si2};
+                vals = gt_p_inc.prefrontal_neg_peak_norm_z(sm);
+                means(si2) = mean(vals,'omitnan');
+                sems(si2) = std(vals,'omitnan') / sqrt(max(sum(~isnan(vals)),1));
+            end
+            clr = ternary_s8(fi==0, CLR_TRUE, CLR_FALSE);
+            lbl = ternary_s8(fi==0, 'True negative FB', 'False negative FB');
+            x_off = (fi-0.5)*0.1;
+            errorbar(ax3, (1:4)+x_off, means, sems, 'o-', ...
+                'Color', clr, 'LineWidth', 1.8, 'MarkerFaceColor', clr, ...
+                'MarkerSize', 7, 'DisplayName', lbl);
+        end
+        set(ax3, 'XTick', 1:4, 'XTickLabel', stages);
+        xlabel(ax3, 'Stage');
+        ylabel(ax3, 'Prefrontal negativity [norm z]');
+        title(ax3, 'C. True vs False negative FB');
+        set(ax3, 'YDir', 'reverse');
+        legend(ax3, 'Box','off','Location','best','FontSize',9);
+    else
+        text(ax3, 0.5, 0.5, 'Insufficient data', 'HorizontalAlignment','center');
+    end
+
+    % Panel D: Discounting — FRN across trial position (P blocks)
+    ax4 = subplot(1,4,4); hold(ax4, 'on');
+    if ~isempty(mdl_frn_discount) && ismember('trial', gt_p_all.Properties.VariableNames)
+        % Bin trials into thirds: early, middle, late
+        for ci = 0:1
+            c_mask = gt_p_all.correct == ci;
+            trial_vals = double(gt_p_all.trial(c_mask));
+            frn_vals   = gt_p_all.prefrontal_neg_peak_norm_z(c_mask);
+            edges = quantile(trial_vals, [0 1/3 2/3 1]);
+            bin_means = nan(1,3); bin_sems = nan(1,3);
+            for bi = 1:3
+                bm = trial_vals >= edges(bi) & trial_vals < edges(bi+1) + (bi==3);
+                v = frn_vals(bm);
+                bin_means(bi) = mean(v,'omitnan');
+                bin_sems(bi) = std(v,'omitnan')/sqrt(max(sum(~isnan(v)),1));
+            end
+            clr = ternary_s8(ci==1, CLR_TRUE, CLR_FALSE);
+            lbl = ternary_s8(ci==1, 'Correct', 'Incorrect');
+            x_off = (ci-0.5)*0.12;
+            errorbar(ax4, (1:3)+x_off, bin_means, bin_sems, 'o-', ...
+                'Color', clr, 'LineWidth', 1.8, 'MarkerFaceColor', clr, ...
+                'MarkerSize', 7, 'DisplayName', lbl);
+        end
+        set(ax4, 'XTick', 1:3, 'XTickLabel', {'Early','Middle','Late'});
+        xlabel(ax4, 'Trial position (within block)');
+        ylabel(ax4, 'Prefrontal negativity [norm z]');
+        title(ax4, 'D. Feedback discounting (P blocks)');
+        set(ax4, 'YDir', 'reverse');
+        legend(ax4, 'Box','off','Location','best','FontSize',9);
+    end
+
+    apply_fig_style(fig2);
+    save_fig(fig2, fullfile(figure_output_folder, 'MRQ2_FRN_prediction_error'));
+    fprintf('  Figure saved: MRQ2_FRN_prediction_error\n');
+
+else
+    warning('MRQ2 skipped: missing required columns.');
+    mdl_frn_pe = []; mdl_frn_upe = []; mdl_frn_false = []; mdl_frn_discount = [];
+end
+
+
+%% =========================================================================
+%  MRQ3: FRONTAL THETA ~ UNSIGNED PE → BEHAVIOURAL ADJUSTMENT
+%  =========================================================================
+%  Hypothesis (Cavanagh et al., 2010; Reteig et al., 2020):
+%    - Mid-frontal theta power scales parametrically with unsigned PE
+%      (the "need for control" signal).
+%    - Theta predicts trial-to-trial behavioural adjustment (stay/switch).
+%    - This relationship should be stronger in D blocks (where feedback
+%      is always valid) than in P blocks (where learned discounting should
+%      attenuate the theta → behaviour link).
+%
+%  Key test: Theta ~ |PE| and Theta → next_correct
+% =========================================================================
+fprintf('\n=== MRQ3: Frontal theta ~ |PE| → behavioural adjustment ===\n');
+
+if all(ismember({'Theta_amp_z','PE_unsigned_z','surprise_z'}, gt.Properties.VariableNames))
+
+    % --- Model 3a: Theta ~ unsigned PE × block type ---
+    gt_m3 = gt(~isnan(gt.Theta_amp_z) & ~isnan(gt.PE_unsigned_z), :);
+
+    mdl_theta_pe = fitlme(gt_m3, ...
+        'Theta_amp_z ~ PE_unsigned_z * block_type + correct + stage + (1 + PE_unsigned_z | subj_id)', ...
+        'FitMethod','REML');
+    fprintf('  Model 3a: Theta ~ |PE| × block_type\n');
+    disp(mdl_theta_pe.Coefficients);
+
+    % --- Model 3b: Theta ~ surprise (Nassar) × block type ---
+    gt_m3b = gt(~isnan(gt.Theta_amp_z) & ~isnan(gt.surprise_z), :);
+
+    mdl_theta_surp = fitlme(gt_m3b, ...
+        'Theta_amp_z ~ surprise_z * block_type + stage + (1 | subj_id)', ...
+        'FitMethod','REML');
+    fprintf('  Model 3b: Theta ~ surprise × block_type\n');
+    disp(mdl_theta_surp.Coefficients);
+
+    % --- Model 3c: Does theta predict next-trial accuracy? ---
+    gt_m3c = gt(~isnan(gt.Theta_amp_z) & ~isnan(gt.next_correct), :);
+
+    if height(gt_m3c) > 50
+        mdl_theta_next = fitglme(gt_m3c, ...
+            'next_correct ~ Theta_amp_z * block_type + correct + stage + (1 | subj_id)', ...
+            'Distribution','Binomial','Link','logit','FitMethod','Laplace');
+        fprintf('  Model 3c: next_correct ~ Theta × block_type (logistic)\n');
+        disp(mdl_theta_next.Coefficients);
+    else
+        mdl_theta_next = [];
+    end
+
+    % ── FIGURE MRQ3: Theta and PE ────────────────────────────────────────────
+    fig3 = figure('Position', [50 50 1200 500], 'Color', 'w');
+    sgtitle('MRQ3: Frontal theta tracks |PE| and predicts behavioural adjustment', ...
+        'FontSize', 14, 'FontWeight', 'bold');
+
+    % Panel A: Theta ~ |PE|, D vs P
+    ax1 = subplot(1,3,1); hold(ax1, 'on');
+    plot_binned_relationship(ax1, gt_m3, 'PE_unsigned_z', 'Theta_amp_z', ...
+        'block_type', {'D','P'}, {CLR_D, CLR_P}, {'Deterministic','Probabilistic'});
+    xlabel(ax1, '|PE| (unsigned) [z]');
+    ylabel(ax1, 'Frontal theta power [z]');
+    title(ax1, 'A. Theta ~ |PE|');
+    legend(ax1, 'Box','off','Location','northwest','FontSize',9);
+
+    % Panel B: Theta ~ surprise (Nassar), D vs P
+    ax2 = subplot(1,3,2); hold(ax2, 'on');
+    plot_binned_relationship(ax2, gt_m3b, 'surprise_z', 'Theta_amp_z', ...
+        'block_type', {'D','P'}, {CLR_D, CLR_P}, {'Deterministic','Probabilistic'});
+    xlabel(ax2, 'Surprise (\omega \times |\delta|) [z]');
+    ylabel(ax2, 'Frontal theta power [z]');
+    title(ax2, 'B. Theta ~ Surprise');
+
+    % Panel C: Theta predicts next-trial accuracy (binned)
+    ax3 = subplot(1,3,3); hold(ax3, 'on');
+    if ~isempty(mdl_theta_next)
+        for bt_i = 1:2
+            bt_lbl = ternary_s8(bt_i==1, 'D', 'P');
+            bt_mask = gt_m3c.block_type == bt_lbl;
+            theta_vals = gt_m3c.Theta_amp_z(bt_mask);
+            next_vals  = gt_m3c.next_correct(bt_mask);
+            edges_t = quantile(theta_vals(~isnan(theta_vals)), linspace(0,1,6));
+            bin_x = nan(1,5); bin_y = nan(1,5); bin_se = nan(1,5);
+            for bi = 1:5
+                bm = theta_vals >= edges_t(bi) & theta_vals < edges_t(bi+1) + (bi==5)*0.01;
+                nv = next_vals(bm);
+                bin_x(bi) = mean(theta_vals(bm),'omitnan');
+                bin_y(bi) = mean(nv,'omitnan');
+                bin_se(bi) = std(nv,'omitnan')/sqrt(max(sum(~isnan(nv)),1));
+            end
+            clr = ternary_s8(bt_i==1, CLR_D, CLR_P);
+            errorbar(ax3, bin_x, bin_y, bin_se, 'o-', ...
+                'Color', clr, 'LineWidth', 1.8, 'MarkerFaceColor', clr, ...
+                'MarkerSize', 7, 'DisplayName', [bt_lbl ' blocks']);
+        end
+        xlabel(ax3, 'Frontal theta [z]');
+        ylabel(ax3, 'P(correct next trial)');
+        title(ax3, 'C. Theta \rightarrow next-trial accuracy');
+        legend(ax3, 'Box','off','Location','best','FontSize',9);
+    end
+
+    apply_fig_style(fig3);
+    save_fig(fig3, fullfile(figure_output_folder, 'MRQ3_theta_PE_adjustment'));
+    fprintf('  Figure saved: MRQ3_theta_PE_adjustment\n');
+
+else
+    warning('MRQ3 skipped: missing required columns.');
+    mdl_theta_pe = []; mdl_theta_surp = []; mdl_theta_next = [];
+end
+
