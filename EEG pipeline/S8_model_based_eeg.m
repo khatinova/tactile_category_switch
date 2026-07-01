@@ -17,6 +17,8 @@ gt.subj_id=categorical(gt.subj_id);gt.block_type=categorical(gt.block_type);
 if ismember('false_fb',gt.Properties.VariableNames),gt.false_fb=double(~gt.trueFB);end
 subj_list=unique(gt.subj_id);
 
+gt = gt(gt.subj_id)
+
 %% MERGE NASSAR LATENTS IF ABSENT
 nn={'PE_nassar','omega','surprise'};
 has_n=all(ismember(nn,gt.Properties.VariableNames))&&sum(~isnan(gt.PE_nassar))>10;
