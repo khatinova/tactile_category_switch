@@ -42,6 +42,33 @@ end
 
 subj_list=unique(gt.subj_id); N_subj=numel(subj_list);
 
+%% EXCLUDE AUDITORY-FEEDBACK SUBJECTS (Ox01–Ox08 had auditory FB, distorts ERP results)
+% Filter by feedback_modality if available, otherwise by subject ID pattern
+if ismember('feedback_modality',gt.Properties.VariableNames)
+    aud_mask = gt.feedback_modality=='auditory' | gt.feedback_modality=='Auditory';
+    if any(aud_mask)
+        fprintf('Excluding %d trials from %d auditory-feedback subjects.\n',...
+            sum(aud_mask), numel(unique(gt.subj_id(aud_mask))));
+        gt = gt(~aud_mask,:);
+    end
+else
+    % Fallback: exclude subjects with ID number < 10 (Ox01-Ox08 pattern)
+    sid_str = string(gt.subj_id);
+    % Extract numeric part from IDs like 'Ox01', 'Ox10', 'sub01', etc.
+    nums = regexp(sid_str, '\d+', 'match', 'once');
+    nums_d = str2double(nums);
+    exclude_mask = nums_d < 10 & ~isnan(nums_d);
+    if any(exclude_mask)
+        excl_subs = unique(gt.subj_id(exclude_mask));
+        fprintf('Excluding %d early subjects (auditory FB): %s\n',...
+            numel(excl_subs), strjoin(string(excl_subs),', '));
+        gt = gt(~exclude_mask,:);
+    end
+end
+% Rebuild subject list after exclusion
+subj_list=unique(gt.subj_id); N_subj=numel(subj_list);
+fprintf('Analysing %d subjects (visual/tactile feedback only).\n', N_subj);
+
 %% MERGE NASSAR LATENTS (same as S8)
 if ~ismember('surprise',gt.Properties.VariableNames)||sum(~isnan(gt.surprise))<10
 fprintf('Merging Nassar latents...\n');
