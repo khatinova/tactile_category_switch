@@ -99,7 +99,7 @@ end
 
 %% Z-SCORE WITHIN SUBJECT
 vz={'PE_nassar','PE_unsigned','omega','alpha_nassar','certainty','surprise','theta_nassar',...
-    'prefrontal_neg_peak_norm','P300_norm','Theta_amp','PLV_fp','PLV_fs'};
+    'prefrontal_mean_norm','P300_norm','Theta_amp','PLV_fp','PLV_fs'};
 for f=1:numel(vz),fn=vz{f};fnz=[fn '_z'];
 if ~ismember(fn,gt.Properties.VariableNames),continue;end
 gt.(fnz)=nan(height(gt),1);
@@ -432,7 +432,7 @@ style_save(fig3a,fullfile(figdir,'Fig3A_ERP_placeholder'));
 %  ═══════════════════════════════════════════════════════════════════════════
 fig3b=figure('Position',[30 30 1100 480],'Color','w');
 
-feat='prefrontal_neg_peak_norm';
+feat='prefrontal_mean_norm';
 
 % LEFT: Raincloud — FRN at LE vs RN, D and P
 subplot(1,2,1); hold on
@@ -721,7 +721,7 @@ style_save(fig3e,fullfile(figdir,'Fig3E_PLV_pathways'));
 fig3f=figure('Position',[30 30 1400 450],'Color','w');
 
 npps_bins=[0 1 2]; npp_x=1:3; npp_labels={'0','1','2+'};
-feats_f={'prefrontal_neg_peak_norm','Theta_amp','PLV_fp'};
+feats_f={'prefrontal_mean_norm','Theta_amp','PLV_fp'};
 feat_labels={'FRN at reversal','Theta at reversal','FP-PLV at reversal'};
 rev_y=[true false false];
 
@@ -802,8 +802,8 @@ if ~ismember('conf_z',gt.Properties.VariableNames)
     end
 end
 
-% Use prefrontal_neg_peak_norm (same as FRN panels) or prefrontal_mean_norm
-feat_conf='prefrontal_neg_peak_norm';
+% Use prefrontal_mean_norm (same as FRN panels) or prefrontal_mean_norm
+feat_conf='prefrontal_mean_norm';
 if ~ismember(feat_conf,gt.Properties.VariableNames)
     feat_conf='prefrontal_mean_norm';
 end
