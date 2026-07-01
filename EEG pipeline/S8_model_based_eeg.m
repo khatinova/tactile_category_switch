@@ -12,6 +12,8 @@ if exist('gt','var')&&istable(gt),fprintf('Using gt.\n');
 elseif exist('group_table','var')&&istable(group_table),gt=group_table;
 else,load(fullfile(stf,'group_feature_table_combined.mat'),'group_table');gt=group_table;end
 CLR_D=[.15 .45 .70];CLR_P=[.80 .30 .10];CLR_T=[.20 .60 .30];CLR_F=[.75 .20 .55];
+
+
 fprintf('\n=== S8 MODEL-BASED EEG ===\n');
 gt.subj_id=categorical(gt.subj_id);gt.block_type=categorical(gt.block_type);
 if ismember('false_fb',gt.Properties.VariableNames),gt.false_fb=double(~gt.trueFB);end
@@ -66,6 +68,32 @@ idx=find(gt.subj_id==subj_list(si)&gt.(bc2)==b);if numel(idx)<2,continue;end
 gt.next_correct(idx(1:end-1))=gt.correct(idx(2:end));end,end
 fprintf('PE_nassar:%d Theta:%d P300:%d non-NaN\n',sum(~isnan(gt.PE_nassar)),sum(~isnan(gt.Theta_amp)),sum(~isnan(gt.P300_norm)));
 
+%% EXCLUDE AUDITORY-FEEDBACK SUBJECTS (Ox01–Ox08 had auditory FB, distorts ERP results)
+% Filter by feedback_modality if available, otherwise by subject ID pattern
+if ismember('feedback_modality',gt.Properties.VariableNames)
+    aud_mask = gt.feedback_modality=='auditory' | gt.feedback_modality=='Auditory';
+    if any(aud_mask)
+        fprintf('Excluding %d trials from %d auditory-feedback subjects.\n',...
+            sum(aud_mask), numel(unique(gt.subj_id(aud_mask))));
+        gt = gt(~aud_mask,:);
+    end
+else
+    % Fallback: exclude subjects with ID number < 10 (Ox01-Ox08 pattern)
+    sid_str = string(gt.subj_id);
+    % Extract numeric part from IDs like 'Ox01', 'Ox10', 'sub01', etc.
+    nums = regexp(sid_str, '\d+', 'match', 'once');
+    nums_d = str2double(nums);
+    exclude_mask = nums_d < 10 & ~isnan(nums_d);
+    if any(exclude_mask)
+        excl_subs = unique(gt.subj_id(exclude_mask));
+        fprintf('Excluding %d early subjects (auditory FB): %s\n',...
+            numel(excl_subs), strjoin(string(excl_subs),', '));
+        gt = gt(~exclude_mask,:);
+    end
+end
+% Rebuild subject list after exclusion
+subj_list=unique(gt.subj_id); N_subj=numel(subj_list);
+fprintf('Analysing %d subjects (visual/tactile feedback only).\n', N_subj);
 %% MRQ1: P300 ~ SURPRISE
 fprintf('\n=== MRQ1 ===\n');
 mdl1a=[];mdl1b=[];mdl1c=[];

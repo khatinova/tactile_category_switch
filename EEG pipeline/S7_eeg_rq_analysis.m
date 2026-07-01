@@ -45,7 +45,7 @@ figure_output_folder = fullfile(base_path, 'Salient mod switch KH', 'Results', '
 %
 % Recommendation: use PLOT_SCALE='norm' for main EEG amplitude figures and
 % PLOT_SCALE='z' for compact model-aligned supplementary figures.
-PLOT_SCALE = 'norm';      % options: 'z', 'norm', 'raw'
+PLOT_SCALE = 'raw';      % options: 'z', 'norm', 'raw'
 
 figure_output_folder = fullfile(figure_output_folder, ['S7_plot_' PLOT_SCALE]);
 if ~exist(figure_output_folder, 'dir'), mkdir(figure_output_folder); end
@@ -131,6 +131,32 @@ fprintf('\nTransition / prior-P plotting columns added.\n');
 if ismember('transition_recent', gt.Properties.VariableNames)
     disp(tabulate(categorical(gt.transition_recent)));
 end
+%% EXCLUDE AUDITORY-FEEDBACK SUBJECTS (Ox01–Ox08 had auditory FB, distorts ERP results)
+% Filter by feedback_modality if available, otherwise by subject ID pattern
+if ismember('feedback_modality',gt.Properties.VariableNames)
+    aud_mask = gt.feedback_modality=='auditory' | gt.feedback_modality=='Auditory';
+    if any(aud_mask)
+        fprintf('Excluding %d trials from %d auditory-feedback subjects.\n',...
+            sum(aud_mask), numel(unique(gt.subj_id(aud_mask))));
+        gt = gt(~aud_mask,:);
+    end
+else
+    % Fallback: exclude subjects with ID number < 10 (Ox01-Ox08 pattern)
+    sid_str = string(gt.subj_id);
+    % Extract numeric part from IDs like 'Ox01', 'Ox10', 'sub01', etc.
+    nums = regexp(sid_str, '\d+', 'match', 'once');
+    nums_d = str2double(nums);
+    exclude_mask = nums_d < 10 & ~isnan(nums_d);
+    if any(exclude_mask)
+        excl_subs = unique(gt.subj_id(exclude_mask));
+        fprintf('Excluding %d early subjects (auditory FB): %s\n',...
+            numel(excl_subs), strjoin(string(excl_subs),', '));
+        gt = gt(~exclude_mask,:);
+    end
+end
+% Rebuild subject list after exclusion
+subj_list=unique(gt.subj_id); N_subj=numel(subj_list);
+fprintf('Analysing %d subjects (visual/tactile feedback only).\n', N_subj);
 
 fprintf('\n\n=== STATISTICAL MODELS ===\n\n');
 
@@ -188,63 +214,6 @@ plot_stage_transition_feedback(gt, P300_PLOT, ...
     'RQ: P300 across stages — D/P and true/false feedback', ...
     figure_output_folder, 'P300_stage_block_feedback', P300_REVERSE_Y);
 
-% =========================================================================
-%% RQ2: Does confidence predict FRN? Stronger in D than P?
-% =========================================================================
-fprintf('\n--- RQ2: Confidence × Feedback negativity × block_type ---\n');
-
-gt_inc = gt(...%gt.correct==0 & ~gt.false_fb & ...
-             ~isnan(gt.confidence) & ~isnan(gt.prefrontal_neg_peak_norm_z), :);
-
-% Z-score confidence within subject
-gt_inc.conf_z = nan(height(gt_inc), 1);
-for si = 1:numel(subj_list)
-    mask = gt_inc.subj_id == subj_list(si);
-    c    = gt_inc.confidence(mask);
-    if sum(mask) > 1 && std(c,'omitnan') > 0
-        gt_inc.conf_z(mask) = (c - mean(c,'omitnan')) / std(c,'omitnan');
-    end
-end
-
-mdl_fn_conf = fitlme(gt_inc, ...
-    ['prefrontal_neg_peak_norm_z ~ conf_z * block_type + stage + ' ...
-     '(1 + conf_z | subj_id)'], ...
-    'FitMethod','REML');
-fprintf('  FRN ~ confidence × block_type (incorrect trials only):\n');
-disp(mdl_fn_conf.Coefficients);
-
-% False feedback analysis (P blocks: does perceived vs true feedback matter?)
-gt_p = gt(gt.block_type=='P' & ...
-           ~isnan(gt.prefrontal_neg_peak_norm_z) & ~isnan(gt.confidence), :);
-gt_p.conf_z    = nan(height(gt_p), 1);
-gt_p.false_fb = categorical(double(gt_p.false_fb), [0 1], {'TrueFB','FalseFB'}); % false_fb kept as the variable name
-
-for si = 1:numel(subj_list)
-    mask = gt_p.subj_id == subj_list(si);
-    c    = gt_p.confidence(mask);
-    if sum(mask) > 1 && std(c,'omitnan') > 0
-        gt_p.conf_z(mask) = (c - mean(c,'omitnan')) / std(c,'omitnan');
-    end
-end
-
-if height(gt_p) > 10
-    mdl_false_fn = fitlme(gt_p, ...
-        ['prefrontal_neg_peak_norm_z ~ conf_z * trueFB + stage + ' ...
-         '(1 | subj_id)'], ...
-        'FitMethod','REML');
-    fprintf('  FRN ~ confidence × trueFB (P blocks only):\n');
-    disp(mdl_false_fn.Coefficients);
-else
-    mdl_false_fn = [];
-    warning('Too few P-block rows for false_fb model.');
-end
-
-% Simplified RQ2 visualisation suite: confidence, false feedback, RW value, RW PE,
-% plus prior-uncertainty moderators. Models use prefrontal_neg_peak_norm_z for
-% significance annotations; plots use the selected FN_PLOT variable so PLOT_SCALE
-% remains respected. Each figure prints its exact LME formula.
-plot_component_predictor_suite_simple_s7d(gt, figure_output_folder, ...
-    'FN', FN_PLOT, 'prefrontal_neg_peak_norm_z', FN_YLBL, FN_REVERSE_Y);
 
 
 % =========================================================================
@@ -261,13 +230,52 @@ mdl_theta = fitlme(gt_th, ...
     'FitMethod','REML');
 fprintf('  Theta model:\n'); disp(mdl_theta.Coefficients);
 
-plot_stage_bar(gt_th, THETA_PLOT, [THETA_YLBL ' (incorrect trials)'], ...
+plot_stage_bar(gt_th, THETA_PLOT, [THETA_YLBL ' (incorrect TFB trials)'], ...
     'RQ3: Stage × Block type — Frontal theta', figure_output_folder, 'RQ3_Theta', THETA_REVERSE_Y);
 
-% Simplified theta analogue of RQ2: confidence, false feedback, RW value, RW PE,
-% plus prior-uncertainty moderators. Each figure prints its exact LME formula.
-plot_component_predictor_suite_simple_s7d(gt, figure_output_folder, ...
-    'Theta', THETA_PLOT, 'Theta_amp_z', THETA_YLBL, THETA_REVERSE_Y);
+    fprintf('\n--- RQ3: Theta × stage × block_type (incorrect trials) ---\n');
+
+gt_th = gt(gt.correct==1 & ~gt.false_fb & ~isnan(gt.Theta_amp_z), :);
+
+% FIX 9: random slope for block_type (2 levels) is tractable; drop stage slope
+mdl_theta = fitlme(gt_th, ...
+    ['Theta_amp_z ~ stage * block_type + ' ...
+     '(1 + block_type | subj_id)'], ...
+    'FitMethod','REML');
+fprintf('  Theta model:\n'); disp(mdl_theta.Coefficients);
+
+plot_stage_bar(gt_th, THETA_PLOT, [THETA_YLBL ' (correct TFB trials)'], ...
+    'RQ3: Stage × Block type — Frontal theta', figure_output_folder, 'RQ3_Theta', THETA_REVERSE_Y);
+
+    fprintf('\n--- RQ3: Theta × stage × block_type (incorrect trials) ---\n');
+
+gt_th = gt(gt.correct==0 & gt.false_fb & ~isnan(gt.Theta_amp_z), :);
+
+% FIX 9: random slope for block_type (2 levels) is tractable; drop stage slope
+mdl_theta = fitlme(gt_th, ...
+    ['Theta_amp_z ~ stage * block_type + ' ...
+     '(1 + block_type | subj_id)'], ...
+    'FitMethod','REML');
+fprintf('  Theta model:\n'); disp(mdl_theta.Coefficients);
+
+plot_stage_bar(gt_th, THETA_PLOT, [THETA_YLBL ' (incorrect FFB trials - perceived correct)'], ...
+    'RQ3: Stage × Block type — Frontal theta', figure_output_folder, 'RQ3_Theta', THETA_REVERSE_Y);
+    
+    gt_th = gt(gt.correct==1 & gt.false_fb & ~isnan(gt.Theta_amp_z), :);
+
+    % FIX 9: random slope for block_type (2 levels) is tractable; drop stage slope
+mdl_theta = fitlme(gt_th, ...
+    ['Theta_amp_z ~ stage * block_type + ' ...
+     '(1 + block_type | subj_id)'], ...
+    'FitMethod','REML');
+fprintf('  Theta model:\n'); disp(mdl_theta.Coefficients);
+
+plot_stage_bar(gt_th, THETA_PLOT, [THETA_YLBL ' (correct FFB trials - perceived wrong)'], ...
+    'RQ3: Stage × Block type — Frontal theta', figure_output_folder, 'RQ3_Theta', THETA_REVERSE_Y);
+
+% RQ2-style confidence/predictor plots for Theta moved to S7_RQ2_RQ3_hierarchical_confidence_models.m
+% plot_component_predictor_suite_simple_s7d(gt, figure_output_folder, ...
+%     'Theta', THETA_PLOT, 'Theta_amp_z', THETA_YLBL, THETA_REVERSE_Y);
 
 
 % =========================================================================
@@ -390,12 +398,14 @@ end
 
 fprintf('\n\nAll RQ analyses complete.\n');
 
-% Save model objects
-models_to_save = {'mdl_fn_rq1','mdl_p3_rq1','mdl_fn_conf', ...
+% Save model objects — RQ2 models (mdl_fn_conf, mdl_false_fn) moved to
+% S7_RQ2_RQ3_hierarchical_confidence_models.m; not saved here.
+models_to_save = {'mdl_fn_rq1','mdl_p3_rq1', ...
                   'mdl_theta','mdl_plv_fp','mdl_plv_predict','mdl_pathway'};
-if exist('mdl_false_fn','var') && ~isempty(mdl_false_fn)
-    models_to_save{end+1} = 'mdl_false_fn';
-end
+% RQ2 models moved to S7_RQ2_RQ3_hierarchical_confidence_models.m
+% if exist('mdl_false_fn','var') && ~isempty(mdl_false_fn)
+%     models_to_save{end+1} = 'mdl_false_fn';
+% end
 % save(fullfile(figure_output_folder,'RQ_models.mat'), models_to_save{:});
 % fprintf('Saved model objects to RQ_models.mat\n');
 
@@ -419,14 +429,15 @@ end
 all_models = struct();
 all_models.RQ1_FN   = struct('mdl', mdl_fn_rq1,      'title', 'RQ1: Feedback negativity ~ block type × outcome');
 all_models.RQ1_P300 = struct('mdl', mdl_p3_rq1,       'title', 'RQ1: P300 ~ block type × outcome');
-all_models.RQ2_FN   = struct('mdl', mdl_fn_conf,       'title', 'RQ2: FN ~ confidence × block type (incorrect)');
+% RQ2_FN and RQ2_FalseFB moved to S7_RQ2_RQ3_hierarchical_confidence_models.m
+% all_models.RQ2_FN   = struct('mdl', mdl_fn_conf,   'title', 'RQ2: FN ~ confidence × block type (incorrect)');
 all_models.RQ3_Th   = struct('mdl', mdl_theta,         'title', 'RQ3: Theta ~ stage × block type (incorrect)');
 all_models.RQ4_PLV  = struct('mdl', mdl_plv_fp,        'title', 'RQ4: FP PLV ~ stage × block type');
 all_models.RQ4_Pred = struct('mdl', mdl_plv_predict,   'title', 'RQ4: Next-trial accuracy ~ PLV × block type');
 all_models.RQ5_Path = struct('mdl', mdl_pathway,        'title', 'RQ5: PLV ~ pathway × stage × block type');
-if exist('mdl_false_fn','var') && ~isempty(mdl_false_fn)
-    all_models.RQ2_FalseFB = struct('mdl', mdl_false_fn, 'title', 'RQ2: FN ~ confidence × false FB (P blocks)');
-end
+% if exist('mdl_false_fn','var') && ~isempty(mdl_false_fn)
+%     all_models.RQ2_FalseFB = struct('mdl', mdl_false_fn, 'title', 'RQ2: FN ~ confidence × false FB (P blocks)');
+% end
 
 % Run all reports
 model_names = fieldnames(all_models);

@@ -501,7 +501,7 @@ alpha_f=10+randn(1,5)*0.5;
 eeg=zeros(5,n_samp);
 for ch=1:5
     pink=cumsum(randn(1,n_samp+200)); pink=pink(201:end)/std(pink(201:end))*8;
-    ae=ones(1,n_samp)*0.6; ae(ev_s:end)=0.4+0.8*exp(-(0:n_samp-ev_s-1)/(0.5*fs));
+    ae=ones(1,n_samp)*0.6; ae(ev_s_1:end)=0.4+0.8*exp(-(0:n_samp-ev_s-1)/(0.5*fs));
     alp=ae.*sin(2*pi*alpha_f(ch)*t_eeg)*12;
     th=(6*(ch<=2)+3*(ch>2)).*sin(2*pi*6*t_eeg+rand*2*pi);
     erp=zeros(1,n_samp);
